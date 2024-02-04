@@ -23,7 +23,7 @@ import (
 	flag "github.com/spf13/pflag"
 )
 
-const APP_NAME = "turbosched"
+const AppName = "turbosched"
 
 var Glog *slog.Logger
 
@@ -50,7 +50,7 @@ func main() {
 		panic(err)
 	}
 
-	common.SetupConfigNameAndPaths(Glog, APP_NAME, "config")
+	common.SetupConfigNameAndPaths(Glog, AppName, "config")
 
 	if err = viper.ReadInConfig(); err != nil {
 		panic(err)
@@ -89,13 +89,19 @@ func controlMain() {
 	Glog.Info("control")
 	db, _ := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
 
-	db.AutoMigrate(&common.DeviceModel{}, &common.NodeModel{})
+	err := db.AutoMigrate(&common.DeviceModel{}, &common.NodeModel{}, &common.TaskModel{})
+	if err != nil {
+		panic(err)
+	}
 
-	controllerInterface := controller.NewControlInterface(db)
+	controllerInterface := controller.NewControlInterface(db, Glog)
 
 	rpcServer := server.NewServer()
-	rpcServer.RegisterName("controller", &controllerInterface, "")
-	err := rpcServer.Serve("tcp", fmt.Sprintf(":%d", globalConfig.Controller.Port))
+	err = rpcServer.RegisterName("controller", controllerInterface, "")
+	if err != nil {
+		panic(err)
+	}
+	err = rpcServer.Serve("tcp", fmt.Sprintf(":%d", globalConfig.Controller.Port))
 	if err != nil {
 		panic(err)
 	}
@@ -143,10 +149,27 @@ func probeGPUDevices() []common.DeviceInfo {
 func computeMain() {
 	Glog.Info("compute")
 
-	computeInterface := compute.ComputeInterface{}
+	d, err := client.NewPeer2PeerDiscovery(fmt.Sprintf("tcp@%s:%d", globalConfig.Controller.Addr, globalConfig.Controller.Port), "")
+	if err != nil {
+		panic(err)
+	}
+	defer d.Close()
+
+	xclient := client.NewXClient("controller", client.Failtry, client.RandomSelect, d, client.DefaultOption)
+	defer func(xclient client.XClient) {
+		err := xclient.Close()
+		if err != nil {
+			panic(err)
+		}
+	}(xclient)
+
+	computeInterface := compute.ComputeInterface{ControlClient: xclient}
 
 	rpcServer := server.NewServer()
-	rpcServer.RegisterName("compute", &computeInterface, "")
+	err = rpcServer.RegisterName("compute", &computeInterface, "")
+	if err != nil {
+		panic(err)
+	}
 
 	var eg errgroup.Group
 	eg.Go(func() error {
@@ -155,7 +178,7 @@ func computeMain() {
 	})
 	// wait for server to come up
 	ctx := context.Background()
-	err := wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, 10*time.Second, true, func(ctx context.Context) (bool, error) {
+	err = wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, 10*time.Second, true, func(ctx context.Context) (bool, error) {
 		return rpcServer.Address() != nil, nil
 	})
 	if err != nil {
@@ -171,21 +194,11 @@ func computeMain() {
 	}
 	listenPort := tcpAddr.Port
 
-	d, err := client.NewPeer2PeerDiscovery(fmt.Sprintf("tcp@%s:%d", globalConfig.Controller.Addr, globalConfig.Controller.Port), "")
-	if err != nil {
-		panic(err)
-	}
-	defer d.Close()
-
-	xclient := client.NewXClient("controller", client.Failtry, client.RandomSelect, d, client.DefaultOption)
-	defer xclient.Close()
-
-	reply := false
 	if err = xclient.Call(context.Background(), "CheckInNode", common.NodeInfo{
 		HostName: hostName,
 		Port:     uint16(listenPort),
 		Devices:  probeGPUDevices(),
-	}, &reply); err != nil {
+	}, &common.VOID); err != nil {
 		panic(err)
 	}
 

@@ -31,6 +31,8 @@ func NewTaskPool(db *gorm.DB, schedCond *sync.Cond) *TaskPool {
 
 // Put a task to the pool.
 func (q *TaskPool) Put(task Task) (uint64, error) {
+	q.schedCond.L.Lock()
+	defer q.schedCond.L.Unlock()
 	result := q.database.Create(task.AsDBPtr())
 	if result.Error != nil {
 		return 0, result.Error
@@ -56,6 +58,8 @@ func NewDevicePool(db *gorm.DB, schedCond *sync.Cond) *DevicePool {
 
 // Put a device to the pool.
 func (q *DevicePool) Put(device Device) error {
+	q.schedCond.L.Lock()
+	defer q.schedCond.L.Unlock()
 	result := q.database.Save(device.AsDBPtr())
 	if result.Error != nil {
 		q.schedCond.Signal()

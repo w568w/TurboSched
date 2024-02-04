@@ -1,6 +1,9 @@
 package common
 
-import "math"
+import (
+	"gorm.io/datatypes"
+	"math"
+)
 
 //go:generate stringer -type=DeviceStatus
 type DeviceStatus int64
@@ -49,7 +52,7 @@ const (
 
 type TaskModel struct {
 	ID                 uint64 `gorm:"primaryKey"`
-	CommandLine        string
+	CommandLine        datatypes.JSONType[CommandLine]
 	Status             TaskStatus
 	DeviceRequirements uint32
 	DeviceModels       []*DeviceModel `gorm:"many2many:device_task;"`
@@ -62,4 +65,12 @@ func (t *TaskModel) GetId() uint64 {
 
 func (t *TaskModel) AsDBPtr() any {
 	return t
+}
+
+type CommandLine struct {
+	Program string
+	// Args is the list of command-line arguments.
+	// You should NOT contain the program name in the args.
+	Args []string
+	Env  []string
 }

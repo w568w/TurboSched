@@ -12,7 +12,7 @@ require (
 	github.com/spf13/viper v1.18.2
 	golang.org/x/sync v0.6.0
 	gorm.io/driver/sqlite v1.5.4
-	gorm.io/gorm v1.25.5
+	gorm.io/gorm v1.25.6
 	k8s.io/apimachinery v0.29.0
 )
 
@@ -30,6 +30,7 @@ require (
 	github.com/go-echarts/go-echarts/v2 v2.3.2 // indirect
 	github.com/go-logr/logr v1.4.1 // indirect
 	github.com/go-ping/ping v1.1.0 // indirect
+	github.com/go-sql-driver/mysql v1.7.1 // indirect
 	github.com/go-task/slim-sprig v0.0.0-20230315185526-52ccab3ef572 // indirect
 	github.com/godzie44/go-uring v0.0.0-20220926161041-69611e8b13d5 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
@@ -97,6 +98,8 @@ require (
 	google.golang.org/protobuf v1.32.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
+	gorm.io/datatypes v1.2.0 // indirect
+	gorm.io/driver/mysql v1.5.2 // indirect
 	k8s.io/klog/v2 v2.110.1 // indirect
 	k8s.io/utils v0.0.0-20240102154912-e7106e64919e // indirect
 )

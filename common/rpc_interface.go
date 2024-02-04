@@ -14,11 +14,17 @@ type DeviceInfo struct {
 
 type TaskAssignInfo struct {
 	ID          uint64
-	CommandLine string
+	CommandLine CommandLine
 	DeviceUuids []string
 }
 
-type TaskSumbitInfo struct {
-	CommandLine        string
+type TaskSubmitInfo struct {
+	CommandLine        CommandLine
 	DeviceRequirements uint32
+}
+
+type TaskReportInfo struct {
+	ID       uint64
+	Output   []byte
+	ExitCode int
 }

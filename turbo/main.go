@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"turbo_sched/common"
@@ -29,6 +30,23 @@ func main() {
 	defer d.Close()
 
 	xclient := client.NewXClient("controller", client.Failtry, client.RandomSelect, d, client.DefaultOption)
-	defer xclient.Close()
+	defer func(xclient client.XClient) {
+		err := xclient.Close()
+		if err != nil {
+			panic(err)
+		}
+	}(xclient)
 
+	var reply uint64
+	err = xclient.Call(context.Background(), "SubmitNewTask", common.TaskSubmitInfo{
+		CommandLine: common.CommandLine{
+			Program: "ls",
+		},
+		DeviceRequirements: 1,
+	}, &reply)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println("Task ID:", reply)
 }
