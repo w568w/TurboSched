@@ -1,8 +1,9 @@
 package srpc
 
 import (
+	"context"
 	"errors"
-	"net/rpc"
+	"github.com/smallnest/rpcx/server"
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
@@ -14,15 +15,20 @@ type StreamManager struct {
 	id       uint64
 	sessions sync.Map
 }
+type IStreamManager interface {
+	Poll(ctx context.Context, sid uint64, reply *[]*StreamEvent) error
+	Cancel(ctx context.Context, sid uint64, loaded *bool) error
+	SoftCancel(ctx context.Context, sid uint64, loaded *bool) error
+}
 
-var manager = StreamManager{id: 0}
+var Manager = StreamManager{id: 0}
 
 func S(f func() error, sess *Session, cfg *SessionConfig) error {
 
-	sid := atomic.AddUint64(&manager.id, 1)
+	sid := atomic.AddUint64(&Manager.id, 1)
 	sess.initSession(sid, cfg)
 
-	manager.sessions.Store(sid, sess)
+	Manager.sessions.Store(sid, sess)
 
 	go func() {
 		defer func() {
@@ -34,7 +40,7 @@ func S(f func() error, sess *Session, cfg *SessionConfig) error {
 				})
 			}
 			sess.waitFlush(sess.cfg.KeepAlive)
-			manager.sessions.Delete(sid)
+			Manager.sessions.Delete(sid)
 		}()
 		sess.mamo.Loop()
 		defer close(sess.doneCh)
@@ -50,7 +56,7 @@ func S(f func() error, sess *Session, cfg *SessionConfig) error {
 }
 
 func (m *StreamManager) Poll(sid uint64, reply *[]*StreamEvent) error {
-	v, loaded := manager.sessions.Load(sid)
+	v, loaded := Manager.sessions.Load(sid)
 	if !loaded {
 		return errNoSuchSession
 	}
@@ -63,7 +69,7 @@ func (m *StreamManager) Poll(sid uint64, reply *[]*StreamEvent) error {
 
 func (m *StreamManager) Cancel(sid uint64, loaded *bool) error {
 	var sess any
-	sess, *loaded = manager.sessions.LoadAndDelete(sid)
+	sess, *loaded = Manager.sessions.LoadAndDelete(sid)
 	if !*loaded {
 		return nil
 	}
@@ -74,7 +80,7 @@ func (m *StreamManager) Cancel(sid uint64, loaded *bool) error {
 
 func (m *StreamManager) SoftCancel(sid uint64, loaded *bool) error {
 	var sess any
-	sess, *loaded = manager.sessions.Load(sid)
+	sess, *loaded = Manager.sessions.Load(sid)
 	if !*loaded {
 		return nil
 	}
@@ -83,6 +89,6 @@ func (m *StreamManager) SoftCancel(sid uint64, loaded *bool) error {
 	return nil
 }
 
-func init() {
-	rpc.Register(&manager)
+func RegisterNameWithStream(server *server.Server, name string, rcvr IStreamManager, metadata string) error {
+	return server.RegisterName(name, rcvr, metadata)
 }

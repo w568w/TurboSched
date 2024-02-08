@@ -1,17 +1,19 @@
 package srpc
 
 import (
-	"net/rpc"
+	"context"
+	"github.com/smallnest/rpcx/client"
 )
 
 type Client struct {
-	*rpc.Client
+	client.XClient
 }
 
 func (c *Client) CallStream(name string, args any) (h *StreamHandle, err error) {
 	h = newStreamHandle(c)
 	var sess Session
-	err = c.Call(name, args, &sess)
+	ctx := context.Background()
+	err = c.Call(ctx, name, args, &sess)
 	if err != nil {
 		return
 	}
@@ -20,6 +22,6 @@ func (c *Client) CallStream(name string, args any) (h *StreamHandle, err error) 
 	return
 }
 
-func WrapClient(c *rpc.Client) *Client {
-	return &Client{Client: c}
+func WrapClient(c client.XClient) *Client {
+	return &Client{XClient: c}
 }

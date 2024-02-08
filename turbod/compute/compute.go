@@ -3,6 +3,7 @@ package compute
 import (
 	"context"
 	"fmt"
+	"github.com/hsfzxjy/go-srpc"
 	"github.com/smallnest/rpcx/client"
 	"os/exec"
 	"turbo_sched/common"
@@ -10,6 +11,19 @@ import (
 
 type ComputeInterface struct {
 	ControlClient client.XClient
+}
+
+// impl IStreamManager for *ComputeInterface
+func (c *ComputeInterface) Poll(ctx context.Context, sid uint64, reply *[]*srpc.StreamEvent) error {
+	return srpc.Manager.Poll(sid, reply)
+}
+
+func (c *ComputeInterface) Cancel(ctx context.Context, sid uint64, loaded *bool) error {
+	return srpc.Manager.Cancel(sid, loaded)
+}
+
+func (c *ComputeInterface) SoftCancel(ctx context.Context, sid uint64, loaded *bool) error {
+	return srpc.Manager.SoftCancel(sid, loaded)
 }
 
 func (c *ComputeInterface) TaskAssign(ctx context.Context, submission *common.TaskAssignInfo, reply *common.Void) error {

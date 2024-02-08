@@ -184,7 +184,7 @@ func (s *Session) flush() (ret []*StreamEvent) {
 		}
 	} else {
 		// block until the first event arrived
-		var breakFirstPoll chan struct{} = s.endCh
+		var breakFirstPoll = s.endCh
 		if s.cfg.PollTimeout > 0 {
 			breakFirstPoll = make(chan struct{})
 			go func() {

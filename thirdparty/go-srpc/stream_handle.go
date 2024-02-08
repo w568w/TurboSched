@@ -1,14 +1,15 @@
 package srpc
 
 import (
-	"net/rpc"
+	"context"
+	"github.com/smallnest/rpcx/client"
 	"sync"
 	"sync/atomic"
 )
 
 type StreamHandle struct {
 	sid        uint64
-	client     *Client
+	client     client.XClient
 	endedCh    chan struct{}
 	isCanceled int32
 	endedOnce  sync.Once
@@ -48,8 +49,12 @@ func (h *StreamHandle) startPoll() error {
 		}
 
 		flushed = nil
-		invokeCh := make(chan *rpc.Call, 1)
-		call := h.client.Go("StreamManager.Poll", h.sid, &flushed, invokeCh)
+		invokeCh := make(chan *client.Call, 1)
+		ctx := context.Background()
+		call, err := h.client.Go(ctx, "StreamManager.Poll", h.sid, &flushed, invokeCh)
+		if err != nil {
+			panic(err)
+		}
 		select {
 		case <-h.endedCh:
 			return nil
@@ -139,7 +144,8 @@ func (h *StreamHandle) GetError() error {
 func (h *StreamHandle) SoftCancel() bool {
 	var reply bool
 	if atomic.CompareAndSwapInt32(&h.isCanceled, 0, 1) {
-		h.client.Call("StreamManager.SoftCancel", h.sid, &reply)
+		ctx := context.Background()
+		h.client.Call(ctx, "StreamManager.SoftCancel", h.sid, &reply)
 	}
 	return reply
 }
@@ -157,7 +163,8 @@ func (h *StreamHandle) Cancel() bool {
 
 	var reply bool
 	if atomic.CompareAndSwapInt32(&h.isCanceled, 0, 1) {
-		h.client.Call("StreamManager.Cancel", h.sid, &reply)
+		ctx := context.Background()
+		h.client.Call(ctx, "StreamManager.Cancel", h.sid, &reply)
 	}
 	return reply
 }

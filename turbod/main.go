@@ -21,6 +21,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 
 	flag "github.com/spf13/pflag"
+
+	srpc "github.com/hsfzxjy/go-srpc"
 )
 
 const AppName = "turbosched"
@@ -167,7 +169,7 @@ func computeMain() {
 	computeInterface := compute.ComputeInterface{ControlClient: xclient}
 
 	rpcServer := server.NewServer()
-	err = rpcServer.RegisterName("compute", &computeInterface, "")
+	err = srpc.RegisterNameWithStream(rpcServer, "compute", &computeInterface, "")
 	if err != nil {
 		panic(err)
 	}

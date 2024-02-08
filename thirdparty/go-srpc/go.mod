@@ -1,5 +1,5 @@
 module github.com/hsfzxjy/go-srpc
 
-go 1.18
+go 1.21.5
 
-require github.com/hsfzxjy/mamo v0.1.4
+require github.com/hsfzxjy/mamo v0.1.5
