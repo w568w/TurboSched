@@ -185,7 +185,8 @@ func (c *ControlInterface) executeTask(task *common.TaskModel, node *common.Node
 	fmt.Println("executeTask", task.ID, node.Name, deviceModels)
 
 	if c.connections[node.Name] == nil {
-		d, err := client.NewPeer2PeerDiscovery(fmt.Sprintf("tcp@%s:%d", node.Addr, node.Port), "")
+		d, err := client.NewPeer2PeerDiscovery(fmt.Sprintf("tcp@%s",
+			net.JoinHostPort(node.Addr, fmt.Sprintf("%d", node.Port))), "")
 		if err != nil {
 			panic(err)
 		}

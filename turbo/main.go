@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"turbo_sched/common"
 
 	"github.com/smallnest/rpcx/client"
@@ -23,7 +24,8 @@ func main() {
 		panic(err)
 	}
 
-	d, err := client.NewPeer2PeerDiscovery(fmt.Sprintf("tcp@%s:%d", globalConfig.Controller.Addr, globalConfig.Controller.Port), "")
+	d, err := client.NewPeer2PeerDiscovery(fmt.Sprintf("tcp@%s",
+		net.JoinHostPort(globalConfig.Controller.Addr, fmt.Sprintf("%d", globalConfig.Controller.Port))), "")
 	if err != nil {
 		panic(err)
 	}
