@@ -18,7 +18,8 @@
 # vendor/
 
 # Go workspace file
-go.work
+# Nonono, we WANT to include this file
+# go.work
 
 # Local testing file
 config.toml
