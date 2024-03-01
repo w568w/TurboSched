@@ -1,0 +1,95 @@
+syntax = "proto3";
+
+import "google/protobuf/empty.proto";
+
+option go_package = "./proto";
+
+// A new node should report NodeInfo to the server.
+message NodeInfo {
+  message DeviceInfo {
+    uint32 localId = 1;
+    string uuid = 2;
+    int64 status = 3; // should be DeviceStatus.
+  }
+  string hostName = 1;
+  uint32 port = 2;
+  repeated DeviceInfo devices = 3;
+}
+
+// A task id.
+message TaskId {
+  uint64 id = 1;
+}
+
+// Controller sends TaskAssignInfo to the node to schedule a new task.
+message TaskAssignInfo {
+  TaskId id = 1;
+  CommandLine commandLine = 2;
+  repeated string deviceUuids = 3;
+  bool interactive = 4;
+}
+
+// CommandLine describes what to run on the node.
+message CommandLine {
+  string program = 1;
+  repeated string args = 2;
+  repeated string env = 3;
+}
+
+// User sends TaskSubmitInfo to the controller to submit a new task.
+message TaskSubmitInfo {
+  CommandLine commandLine = 1;
+  uint32 deviceRequirement = 2; // how many GPUs are required.
+}
+
+// User listens to TaskEvent to get the task status change.
+message TaskEvent {
+  message ConnInfo {
+    string host = 1;
+    uint32 port = 2;
+    string token = 3;
+  }
+  message ReadyForAttach {
+    TaskId id = 1;
+    repeated ConnInfo connInfos = 2;
+  }
+  oneof event {
+    TaskId obtainedId = 1;
+    ReadyForAttach readyForAttach = 2;
+  }
+}
+
+// A node reports TaskReportInfo to the server to report a task status change.
+message TaskReportInfo {
+  message TaskExited {
+    bytes output = 1;
+    int32 exitCode = 2;
+  }
+
+  message TaskReadyForAttach {
+    string token = 1;
+  }
+  TaskId id = 1;
+
+  oneof event {
+    TaskExited exited = 2;
+    TaskReadyForAttach readyForAttach = 3;
+  }
+}
+
+// The byte stream of a SSH tunnel.
+message SshBytes {
+  bytes data = 1;
+}
+
+service Controller {
+  rpc CheckInNode(NodeInfo) returns (google.protobuf.Empty) {}
+  rpc ReportTask(TaskReportInfo) returns (google.protobuf.Empty) {}
+  rpc SubmitNewTask(TaskSubmitInfo) returns (TaskId) {}
+  rpc SubmitNewTaskInteractive(TaskSubmitInfo) returns (stream TaskEvent) {}
+}
+
+service Compute {
+  rpc TaskAssign(TaskAssignInfo) returns (google.protobuf.Empty) {}
+  rpc SshTunnel(stream SshBytes) returns (stream SshBytes) {}
+}

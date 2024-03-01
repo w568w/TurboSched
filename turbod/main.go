@@ -3,26 +3,23 @@ package main
 import (
 	"context"
 	"fmt"
+	grpc_auth "github.com/grpc-ecosystem/go-grpc-middleware/auth"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"log/slog"
 	"net"
 	"os"
-	"time"
 	"turbo_sched/common"
+	pb "turbo_sched/common/proto"
 	"turbo_sched/turbod/compute"
 	"turbo_sched/turbod/controller"
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
-	"github.com/smallnest/rpcx/client"
-	"github.com/smallnest/rpcx/server"
+	flag "github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"golang.org/x/sync/errgroup"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
-	"k8s.io/apimachinery/pkg/util/wait"
-
-	flag "github.com/spf13/pflag"
-
-	srpc "github.com/hsfzxjy/go-srpc"
 )
 
 const AppName = "turbosched"
@@ -98,19 +95,21 @@ func controlMain() {
 
 	controllerInterface := controller.NewControlInterface(db, Glog)
 
-	rpcServer := server.NewServer()
-	err = rpcServer.RegisterName("controller", controllerInterface, "")
+	l, err := net.Listen("tcp", fmt.Sprintf(":%d", globalConfig.Controller.Port))
 	if err != nil {
 		panic(err)
 	}
-	err = rpcServer.Serve("tcp", fmt.Sprintf(":%d", globalConfig.Controller.Port))
+	var opts []grpc.ServerOption
+	grpcServer := grpc.NewServer(opts...)
+	pb.RegisterControllerServer(grpcServer, controllerInterface)
+	err = grpcServer.Serve(l)
 	if err != nil {
 		panic(err)
 	}
 }
 
-func probeGPUDevices() []common.DeviceInfo {
-	devices := make([]common.DeviceInfo, 0)
+func probeGPUDevices() []*pb.NodeInfo_DeviceInfo {
+	devices := make([]*pb.NodeInfo_DeviceInfo, 0)
 	ret := nvml.Init()
 	if ret != nvml.SUCCESS {
 		panic(fmt.Sprintf("Unable to initialize NVML: %v", nvml.ErrorString(ret)))
@@ -138,7 +137,7 @@ func probeGPUDevices() []common.DeviceInfo {
 			panic(fmt.Sprintf("Unable to get UUID of device at index %d: %v", i, nvml.ErrorString(ret)))
 		}
 
-		devices = append(devices, common.DeviceInfo{
+		devices = append(devices, &pb.NodeInfo_DeviceInfo{
 			LocalId: uint32(i),
 			Uuid:    uuid,
 			Status:  common.Idle,
@@ -151,60 +150,48 @@ func probeGPUDevices() []common.DeviceInfo {
 func computeMain() {
 	Glog.Info("compute")
 
-	d, err := client.NewPeer2PeerDiscovery(fmt.Sprintf("tcp@%s",
-		net.JoinHostPort(globalConfig.Controller.Addr, fmt.Sprintf("%d", globalConfig.Controller.Port))), "")
+	opts := []grpc.DialOption{
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	}
+	conn, err := grpc.Dial(fmt.Sprintf("%s:%d", globalConfig.Controller.Addr, globalConfig.Controller.Port), opts...)
 	if err != nil {
 		panic(err)
 	}
-	defer d.Close()
+	defer conn.Close()
 
-	xclient := client.NewXClient("controller", client.Failtry, client.RandomSelect, d, client.DefaultOption)
-	defer func(xclient client.XClient) {
-		err := xclient.Close()
-		if err != nil {
-			panic(err)
-		}
-	}(xclient)
+	client := pb.NewControllerClient(conn)
 
-	computeInterface := compute.ComputeInterface{ControlClient: xclient}
+	computeInterface := compute.NewComputeInterface(client)
 
-	rpcServer := server.NewServer()
-	err = srpc.RegisterNameWithStream(rpcServer, "compute", &computeInterface, "")
+	l, err := net.Listen("tcp", ":0")
 	if err != nil {
 		panic(err)
 	}
-
+	svrOpts := []grpc.ServerOption{
+		grpc.StreamInterceptor(grpc_auth.StreamServerInterceptor(computeInterface.AuthIntercept)),
+	}
+	grpcServer := grpc.NewServer(svrOpts...)
+	pb.RegisterComputeServer(grpcServer, computeInterface)
 	var eg errgroup.Group
 	eg.Go(func() error {
-		// automatically choose a port
-		return rpcServer.Serve("tcp", ":0")
+		return grpcServer.Serve(l)
 	})
-	// wait for server to come up
-	ctx := context.Background()
-	err = wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, 10*time.Second, true, func(ctx context.Context) (bool, error) {
-		return rpcServer.Address() != nil, nil
-	})
-	if err != nil {
-		// must be timeout
-		Glog.Error(fmt.Sprintf("Timeout when waiting for RPC server to start: %v", err))
-		os.Exit(1)
-	}
-	Glog.Info(fmt.Sprintf("RPC server started at %s", rpcServer.Address().String()))
+
+	Glog.Info(fmt.Sprintf("RPC server started at %s", l.Addr().String()))
 	// parse port from address
-	tcpAddr, err := net.ResolveTCPAddr(rpcServer.Address().Network(), rpcServer.Address().String())
+	tcpAddr, err := net.ResolveTCPAddr(l.Addr().Network(), l.Addr().String())
 	if err != nil {
 		panic(err)
 	}
 	listenPort := tcpAddr.Port
-
-	if err = xclient.Call(context.Background(), "CheckInNode", common.NodeInfo{
+	_, err = client.CheckInNode(context.Background(), &pb.NodeInfo{
 		HostName: hostName,
-		Port:     uint16(listenPort),
+		Port:     uint32(listenPort),
 		Devices:  probeGPUDevices(),
-	}, &common.VOID); err != nil {
+	})
+	if err != nil {
 		panic(err)
 	}
-
 	if err = eg.Wait(); err != nil {
 		panic(err)
 	}

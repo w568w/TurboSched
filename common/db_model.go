@@ -66,11 +66,3 @@ func (t *TaskModel) GetId() uint64 {
 func (t *TaskModel) AsDBPtr() any {
 	return t
 }
-
-type CommandLine struct {
-	Program string
-	// Args is the list of command-line arguments.
-	// You should NOT contain the program name in the args.
-	Args []string
-	Env  []string
-}

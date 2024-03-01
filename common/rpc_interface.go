@@ -1,30 +1,26 @@
 package common
 
-type NodeInfo struct {
-	HostName string
-	Port     uint16
-	Devices  []DeviceInfo
+import pb "turbo_sched/common/proto"
+
+// RawCommandLine is a JSON-friendly wrapper for the [pb.CommandLine] protobuf struct.
+type RawCommandLine struct {
+	Program string
+	Args    []string
+	Env     []string
 }
 
-type DeviceInfo struct {
-	LocalId uint32
-	Uuid    string
-	Status  DeviceStatus
+func ToRawCommandLine(cmdLine *pb.CommandLine) RawCommandLine {
+	return RawCommandLine{
+		Program: cmdLine.Program,
+		Args:    cmdLine.Args,
+		Env:     cmdLine.Env,
+	}
 }
 
-type TaskAssignInfo struct {
-	ID          uint64
-	CommandLine CommandLine
-	DeviceUuids []string
-}
-
-type TaskSubmitInfo struct {
-	CommandLine        CommandLine
-	DeviceRequirements uint32
-}
-
-type TaskReportInfo struct {
-	ID       uint64
-	Output   []byte
-	ExitCode int
+func (r *RawCommandLine) ToCommandLine() *pb.CommandLine {
+	return &pb.CommandLine{
+		Program: r.Program,
+		Args:    r.Args,
+		Env:     r.Env,
+	}
 }

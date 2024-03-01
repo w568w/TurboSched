@@ -4,5 +4,4 @@ toolchain go1.21.7
 
 use (
 	.
-	thirdparty/go-srpc
 )
