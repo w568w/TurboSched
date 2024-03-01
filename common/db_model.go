@@ -5,19 +5,16 @@ import (
 	"math"
 )
 
-//go:generate stringer -type=DeviceStatus
-type DeviceStatus int64
-
 const (
-	Idle  DeviceStatus = math.MaxInt64 - 1
-	Error DeviceStatus = math.MaxInt64
+	Idle  int64 = math.MaxInt64 - 1
+	Error int64 = math.MaxInt64
 )
 
 type DeviceModel struct {
 	LocalId       uint32
 	Uuid          string `gorm:"primaryKey"`
 	NodeModelName string // foreign key
-	Status        DeviceStatus
+	Status        int64
 	Tasks         []*TaskModel `gorm:"many2many:device_task;"`
 }
 
@@ -44,6 +41,9 @@ const (
 	Pending TaskStatus = iota
 	// the task is being submitted to the node(s)
 	Submitting
+	// the task has been submitted and waiting for attaching
+	// (only for interactive tasks)
+	Attaching
 	// the task is running on the node(s)
 	Running
 	// the task has exited
@@ -52,10 +52,11 @@ const (
 
 type TaskModel struct {
 	ID                 uint64 `gorm:"primaryKey"`
-	CommandLine        datatypes.JSONType[CommandLine]
+	CommandLine        datatypes.JSONType[RawCommandLine]
 	Status             TaskStatus
 	DeviceRequirements uint32
 	DeviceModels       []*DeviceModel `gorm:"many2many:device_task;"`
+	Interactive        bool
 }
 
 // impl Task for TaskModel
