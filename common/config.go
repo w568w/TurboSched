@@ -41,11 +41,11 @@ func SetupConfigNameAndPaths(Glog *slog.Logger, appName string, configFileName s
 	case "darwin", "ios":
 		viper.AddConfigPath(filepath.Join("Library", "Application Support", appName))
 	default:
-		fhs_config := filepath.Join("etc", appName)
+		fhsConfig := filepath.Join("etc", appName)
 		if runtime.GOOS != "linux" && runtime.GOOS != "freebsd" && runtime.GOOS != "netbsd" && runtime.GOOS != "openbsd" {
-			Glog.Warn(fmt.Sprintf("Unsupported os: %s. Will probe %s.", runtime.GOOS, fhs_config))
+			Glog.Warn(fmt.Sprintf("Unsupported os: %s. Will probe %s.", runtime.GOOS, fhsConfig))
 		}
-		viper.AddConfigPath(fhs_config)
+		viper.AddConfigPath(fhsConfig)
 	}
 }
 

@@ -1,7 +1,6 @@
 package common
 
 import (
-	"errors"
 	"fmt"
 	"golang.org/x/sync/errgroup"
 	"slices"
@@ -58,7 +57,7 @@ func (eb *EventBus[KeyType]) Subscribe(key KeyType, channelBufferSize int) chan 
 			eg.Go(func() (e error) {
 				defer func() {
 					if r := recover(); r != nil {
-						e = errors.New(fmt.Sprintf("panic: %v", r))
+						e = fmt.Errorf("panic: %v", r)
 					}
 				}()
 				for _, message := range eb.messages[key][curMessagePos:] {

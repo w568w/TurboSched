@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	grpc_auth "github.com/grpc-ecosystem/go-grpc-middleware/auth"
+	grpcauth "github.com/grpc-ecosystem/go-grpc-middleware/auth"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"log/slog"
@@ -43,7 +43,7 @@ func main() {
 	flag.BoolVarP(&args.RunCompute, "compute", "m", false, "Run as compute node")
 	flag.Parse()
 
-	var err error = nil
+	var err error
 	hostName, err = os.Hostname()
 	if err != nil {
 		panic(err)
@@ -86,9 +86,11 @@ func main() {
 
 func controlMain() {
 	Glog.Info("control")
-	db, _ := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
-
-	err := db.AutoMigrate(&common.DeviceModel{}, &common.NodeModel{}, &common.TaskModel{})
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	if err != nil {
+		panic(err)
+	}
+	err = db.AutoMigrate(&common.DeviceModel{}, &common.NodeModel{}, &common.TaskModel{})
 	if err != nil {
 		panic(err)
 	}
@@ -157,7 +159,12 @@ func computeMain() {
 	if err != nil {
 		panic(err)
 	}
-	defer conn.Close()
+	defer func(conn *grpc.ClientConn) {
+		err := conn.Close()
+		if err != nil {
+			panic(err)
+		}
+	}(conn)
 
 	client := pb.NewControllerClient(conn)
 
@@ -168,7 +175,7 @@ func computeMain() {
 		panic(err)
 	}
 	svrOpts := []grpc.ServerOption{
-		grpc.StreamInterceptor(grpc_auth.StreamServerInterceptor(computeInterface.AuthIntercept)),
+		grpc.StreamInterceptor(grpcauth.StreamServerInterceptor(computeInterface.AuthIntercept)),
 	}
 	grpcServer := grpc.NewServer(svrOpts...)
 	pb.RegisterComputeServer(grpcServer, computeInterface)

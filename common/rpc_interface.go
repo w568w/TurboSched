@@ -1,7 +1,7 @@
 package common
 
 import (
-	grpc_net_conn "github.com/hashicorp/go-grpc-net-conn"
+	grpcnetconn "github.com/hashicorp/go-grpc-net-conn"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 	pb "turbo_sched/common/proto"
@@ -30,9 +30,9 @@ func (r *RawCommandLine) ToCommandLine() *pb.CommandLine {
 	}
 }
 
-func NewGrpcConn(stream grpc.Stream) (*grpc_net_conn.Conn, <-chan *pb.SshBytes_SshAttributeUpdate) {
+func NewGrpcConn(stream grpc.Stream) (*grpcnetconn.Conn, <-chan *pb.SshBytes_SshAttributeUpdate) {
 	attributeUpdates := make(chan *pb.SshBytes_SshAttributeUpdate)
-	netConn := &grpc_net_conn.Conn{
+	netConn := &grpcnetconn.Conn{
 		Stream:   stream,
 		Request:  &pb.SshBytes{},
 		Response: &pb.SshBytes{},

@@ -3,11 +3,6 @@ package common
 // Some misc functions that are used in multiple places, but don't really belong
 // anywhere else.
 
-// Void is a type that can be used to indicate that a function returns nothing.
-type Void struct{}
-
-var VOID Void
-
 // Map applies the provided function to each element of the slice and returns a new slice.
 func Map[S ~[]T, T, U any](input S, fn func(T) U) []U {
 	result := make([]U, len(input))
