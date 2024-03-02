@@ -23,3 +23,9 @@
 
 # Local testing file
 config.toml
+
+# Goland IDE
+.idea/
+
+# Protobuf generated files
+*.pb.go
