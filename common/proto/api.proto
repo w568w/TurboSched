@@ -84,8 +84,12 @@ message SshBytes {
       uint32 rows = 1;
       uint32 columns = 2;
     }
+    message ExitStatus {
+      int32 exitStatus = 1;
+    }
     oneof update {
-      WindowSize windowSize = 1;
+      WindowSize windowSize = 1; // send from user to compute.
+      ExitStatus exitStatus = 2; // send from compute to user.
     }
   }
   oneof data {

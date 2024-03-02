@@ -5,7 +5,8 @@ import (
 	"fmt"
 	"github.com/creack/pty"
 	"github.com/google/uuid"
-	grpc_auth "github.com/grpc-ecosystem/go-grpc-middleware/auth"
+	grpcauth "github.com/grpc-ecosystem/go-grpc-middleware/auth"
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
@@ -28,6 +29,7 @@ type ComputeInterface struct {
 func (c *ComputeInterface) SshTunnel(server pb.Compute_SshTunnelServer) error {
 	s := server.Context().Value(Session).(computeSession)
 
+	procExited := make(chan bool)
 	netConn, attrUpdateChan := common.NewGrpcConn(server)
 
 	// piping the netConn with the stdin/stdout/stderr of the command
@@ -36,77 +38,85 @@ func (c *ComputeInterface) SshTunnel(server pb.Compute_SshTunnelServer) error {
 
 	// wait the first window size update
 	windowEvent, err := server.Recv()
+	if err != nil {
+		return err
+	}
 	window := windowEvent.GetAttributeUpdate().GetWindowSize()
 	if window == nil {
-		return fmt.Errorf("first message should be a window size update")
+		return fmt.Errorf("first message should be about window size")
 	}
-	println("Window size:", window.Rows, window.Columns)
 	f, err := pty.StartWithSize(cmd, &pty.Winsize{
 		Rows: uint16(window.Rows),
 		Cols: uint16(window.Columns),
 	})
-	go func() {
-		_, err := io.Copy(f, netConn)
-		if err != nil {
-			panic(err)
-		}
-	}()
-	go func() {
-		for attribute := range attrUpdateChan {
-			if windowSize := attribute.GetWindowSize(); windowSize != nil {
-				println("New Window size:", windowSize.Rows, windowSize.Columns)
-				pty.Setsize(f, &pty.Winsize{
-					Rows: uint16(windowSize.Rows),
-					Cols: uint16(windowSize.Columns),
-				})
+	if err != nil {
+		return err
+	}
+	var eg errgroup.Group
+	eg.Go(func() error {
+		_, _ = io.Copy(f, netConn)
+		return nil
+	})
+	eg.Go(func() error {
+		_, _ = io.Copy(netConn, f)
+		return nil
+	})
+	eg.Go(func() error {
+		for {
+			select {
+			case <-procExited:
+				return nil
+			case attribute := <-attrUpdateChan:
+				if windowSize := attribute.GetWindowSize(); windowSize != nil {
+					err := pty.Setsize(f, &pty.Winsize{
+						Rows: uint16(windowSize.Rows),
+						Cols: uint16(windowSize.Columns),
+					})
+					if err != nil {
+						return err
+					}
+				}
 			}
 		}
-	}()
-	_, err = io.Copy(netConn, f)
-	if err != nil {
-		panic(err)
-	}
+	})
 	err = cmd.Wait()
-	println("Process exited")
 	if err != nil {
 		panic(err)
 	}
-
-	// clean up
-	_, err = c.ControlClient.ReportTask(context.Background(), &pb.TaskReportInfo{
-		Id: s.assignInfo.Id,
-		Event: &pb.TaskReportInfo_Exited{
-			Exited: &pb.TaskReportInfo_TaskExited{
-				ExitCode: int32(cmd.ProcessState.ExitCode()),
-				Output:   make([]byte, 0),
+	procExited <- true
+	err = server.Send(&pb.SshBytes{
+		Data: &pb.SshBytes_AttributeUpdate{
+			AttributeUpdate: &pb.SshBytes_SshAttributeUpdate{
+				Update: &pb.SshBytes_SshAttributeUpdate_ExitStatus_{
+					ExitStatus: &pb.SshBytes_SshAttributeUpdate_ExitStatus{
+						ExitStatus: int32(cmd.ProcessState.ExitCode()),
+					},
+				},
 			},
 		},
 	})
 	if err != nil {
 		panic(err)
 	}
-	return nil
-	//rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	//if err != nil {
-	//	panic(err)
-	//}
-	//signer, err := gossh.NewSignerFromKey(rsaKey)
-	//if err != nil {
-	//	panic(err)
-	//}
-	//sshServer := &ssh.Server{
-	//	Handler: func(s ssh.Session) {
-	//		// TODO start the command and connect the stdin/stdout/stderr to the netConn
-	//		print("Print the command")
-	//		_, _ = io.WriteString(s, fmt.Sprintf("Hello %s\n", s.User()))
-	//	},
-	//	ConnectionFailedCallback: func(conn net.Conn, err error) {
-	//		panic(err)
-	//	},
-	//	HostSigners: []ssh.Signer{signer},
-	//}
-	//sshServer.HandleConn(netConn)
-	//print("HandleConn")
+	// clean up
+	_, err = c.ControlClient.ReportTask(context.Background(), &pb.TaskReportInfo{
+		Id: s.assignInfo.Id,
+		Event: &pb.TaskReportInfo_Exited{
+			Exited: &pb.TaskReportInfo_TaskExited{
+				ExitCode: int32(cmd.ProcessState.ExitCode()),
+				Output:   nil,
+			},
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	err = eg.Wait()
+	if err != nil {
+		panic(err)
+	}
+
 	return nil
 }
 
@@ -122,7 +132,7 @@ func NewComputeInterface(controlClient pb.ControllerClient) *ComputeInterface {
 }
 
 func (c *ComputeInterface) AuthIntercept(ctx context.Context) (context.Context, error) {
-	token, err := grpc_auth.AuthFromMD(ctx, "bearer")
+	token, err := grpcauth.AuthFromMD(ctx, "bearer")
 	if err != nil {
 		return nil, err
 	}

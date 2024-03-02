@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/creack/pty"
 	"github.com/grpc-ecosystem/go-grpc-middleware/util/metautils"
+	"github.com/ross96D/cancelreader"
 	"github.com/spf13/viper"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/term"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -20,7 +23,7 @@ import (
 	pb "turbo_sched/common/proto"
 )
 
-const APP_NAME = "turbosched"
+const AppName = "turbosched"
 
 var globalConfig common.FileConfig
 
@@ -30,7 +33,7 @@ func ctxWithToken(ctx context.Context, scheme string, token string) context.Cont
 }
 
 func main() {
-	common.SetupConfigNameAndPaths(slog.Default(), APP_NAME, "config")
+	common.SetupConfigNameAndPaths(slog.Default(), AppName, "config")
 	if err := viper.ReadInConfig(); err != nil {
 		panic(err)
 	}
@@ -61,113 +64,119 @@ func main() {
 
 	for {
 		event, err := stream.Recv()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			log.Fatalf("%v.SubmitNewTaskInteractive(_) = _, %v", client, err)
+			log.Panicf("%v.SubmitNewTaskInteractive(_) = _, %v", client, err)
 		}
 		log.Println(event)
 		if readyForAttach := event.GetReadyForAttach(); readyForAttach != nil {
-			conn, err := grpc.Dial(fmt.Sprintf("%s:%d", readyForAttach.ConnInfos[0].Host, readyForAttach.ConnInfos[0].Port), opts...)
-			if err != nil {
-				panic(err)
-			}
-			defer conn.Close()
+			interactiveTaskMain(readyForAttach)
+		}
+	}
+}
 
-			computeClient := pb.NewComputeClient(conn)
+func interactiveTaskMain(readyForAttach *pb.TaskEvent_ReadyForAttach) {
+	opts := []grpc.DialOption{
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	}
+	conn, err := grpc.Dial(fmt.Sprintf("%s:%d", readyForAttach.ConnInfos[0].Host, readyForAttach.ConnInfos[0].Port), opts...)
+	if err != nil {
+		panic(err)
+	}
+	defer conn.Close()
 
-			sshStream, err := computeClient.SshTunnel(ctxWithToken(context.Background(), "bearer", readyForAttach.ConnInfos[0].Token))
-			if err != nil {
-				panic(err)
-			}
+	computeClient := pb.NewComputeClient(conn)
 
-			netConn, _ := common.NewGrpcConn(sshStream)
+	sshStream, err := computeClient.SshTunnel(ctxWithToken(context.Background(), "bearer", readyForAttach.ConnInfos[0].Token))
+	if err != nil {
+		panic(err)
+	}
 
-			// send window size
-			r, c, _ := pty.Getsize(os.Stdin)
-			err = sshStream.Send(&pb.SshBytes{
-				Data: &pb.SshBytes_AttributeUpdate{
-					AttributeUpdate: &pb.SshBytes_SshAttributeUpdate{
-						Update: &pb.SshBytes_SshAttributeUpdate_WindowSize_{
-							WindowSize: &pb.SshBytes_SshAttributeUpdate_WindowSize{
-								Rows:    uint32(r),
-								Columns: uint32(c),
-							},
-						},
+	netConn, attrUpdateChan := common.NewGrpcConn(sshStream)
+	// send window size
+	r, c, _ := pty.Getsize(os.Stdin)
+	err = sshStream.Send(&pb.SshBytes{
+		Data: &pb.SshBytes_AttributeUpdate{
+			AttributeUpdate: &pb.SshBytes_SshAttributeUpdate{
+				Update: &pb.SshBytes_SshAttributeUpdate_WindowSize_{
+					WindowSize: &pb.SshBytes_SshAttributeUpdate_WindowSize{
+						Rows:    uint32(r),
+						Columns: uint32(c),
 					},
 				},
-			})
-			if err != nil {
-				panic(err)
-			}
-			println("Window size sent")
+			},
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+	println("Window size sent")
 
-			// Handle pty size.
-			ch := make(chan os.Signal, 1)
-			signal.Notify(ch, syscall.SIGWINCH)
-			go func() {
-				for range ch {
-					r, c, _ := pty.Getsize(os.Stdin)
-					err = sshStream.Send(&pb.SshBytes{
-						Data: &pb.SshBytes_AttributeUpdate{
-							AttributeUpdate: &pb.SshBytes_SshAttributeUpdate{
-								Update: &pb.SshBytes_SshAttributeUpdate_WindowSize_{
-									WindowSize: &pb.SshBytes_SshAttributeUpdate_WindowSize{
-										Rows:    uint32(r),
-										Columns: uint32(c),
-									},
+	exitCodeChan := make(chan int32, 1)
+	// Handle pty size.
+	sizeChangedSig := make(chan os.Signal, 1)
+	signal.Notify(sizeChangedSig, syscall.SIGWINCH)
+	go func() {
+		for {
+			select {
+			case attribute := <-attrUpdateChan:
+				if exitStatus := attribute.GetExitStatus(); exitStatus != nil {
+					exitCodeChan <- exitStatus.ExitStatus
+					return
+				}
+			case <-sizeChangedSig:
+				r, c, _ := pty.Getsize(os.Stdin)
+				err = sshStream.Send(&pb.SshBytes{
+					Data: &pb.SshBytes_AttributeUpdate{
+						AttributeUpdate: &pb.SshBytes_SshAttributeUpdate{
+							Update: &pb.SshBytes_SshAttributeUpdate_WindowSize_{
+								WindowSize: &pb.SshBytes_SshAttributeUpdate_WindowSize{
+									Rows:    uint32(r),
+									Columns: uint32(c),
 								},
 							},
 						},
-					})
-					if err != nil {
-						panic(err)
-					}
-				}
-			}()
-
-			// piping the netConn with the stdin/stdout/stderr
-			oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
-			if err != nil {
-				panic(err)
-			}
-			defer func() { _ = term.Restore(int(os.Stdin.Fd()), oldState) }()
-			go func() {
-				_, err := io.Copy(netConn, os.Stdin)
+					},
+				})
 				if err != nil {
-					panic(err)
+					// TODO: log error to console
+					println("error sending window size")
 				}
-			}()
-			_, err = io.Copy(os.Stdout, netConn)
-			if err != nil {
-				panic(err)
 			}
-
-			//sshClientConfig := ssh.ClientConfig{
-			//	HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-			//}
-			//con, n, r, err := ssh.NewClientConn(netConn, fmt.Sprintf("%s:%d", readyForAttach.ConnInfos[0].Host, readyForAttach.ConnInfos[0].Port), &sshClientConfig)
-			//if err != nil {
-			//	panic(err)
-			//}
-			//sshClient := ssh.NewClient(con, n, r)
-			//session, err := sshClient.NewSession()
-			//if err != nil {
-			//	panic(err)
-			//}
-			//defer session.Close()
-			//
-			//p, err := session.StdoutPipe()
-			//if err != nil {
-			//	panic(err)
-			//}
-			//output, err := io.ReadAll(p)
-			//if err != nil {
-			//	panic(err)
-			//}
-			//fmt.Println(string(output))
 		}
-	}
+	}()
 
+	// piping the netConn with the stdin/stdout/stderr
+	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	if err != nil {
+		panic(err)
+	}
+	defer func() { _ = term.Restore(int(os.Stdin.Fd()), oldState) }()
+	var eg errgroup.Group
+	cancelableStdin, err := cancelreader.NewReader(os.Stdin)
+	if err != nil {
+		panic(err)
+	}
+	eg.Go(func() error {
+		_, err := io.Copy(netConn, cancelableStdin)
+		return err
+	})
+	eg.Go(func() error {
+		_, err := io.Copy(os.Stdout, netConn)
+		return err
+	})
+
+	// wait for the command to exit
+	exitCode := <-exitCodeChan
+	println("Command exited with code", exitCode)
+	// cancel the piping stdin
+	cancelableStdin.Cancel()
+	// close the sshStream
+	netConn.Close()
+	// wait for the io.Copy to finish
+	if err := eg.Wait(); !errors.Is(err, cancelreader.ErrCanceled) && !errors.Is(err, io.EOF) {
+		panic(err)
+	}
 }
