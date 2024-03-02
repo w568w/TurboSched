@@ -7,7 +7,7 @@ TurboSched aims to be a modern alternative to the traditional job schedulers, e.
 
 ## Roadmap
 - [x] Basic single-node execution
-- [ ] Basic single-node scheduling
+- [x] Basic single-node scheduling
 - [ ] GPU resource management
 - [ ] GPU-aware scheduling
 - [ ] Basic multi-node scheduling

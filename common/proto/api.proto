@@ -79,7 +79,19 @@ message TaskReportInfo {
 
 // The byte stream of a SSH tunnel.
 message SshBytes {
-  bytes data = 1;
+  message SshAttributeUpdate {
+    message WindowSize {
+      uint32 rows = 1;
+      uint32 columns = 2;
+    }
+    oneof update {
+      WindowSize windowSize = 1;
+    }
+  }
+  oneof data {
+    bytes rawData = 1;
+    SshAttributeUpdate attributeUpdate = 2;
+  }
 }
 
 service Controller {
@@ -91,5 +103,6 @@ service Controller {
 
 service Compute {
   rpc TaskAssign(TaskAssignInfo) returns (google.protobuf.Empty) {}
+  // the first message must be SshBytes.SshAttributeUpdate.WindowSize, or an error will be returned.
   rpc SshTunnel(stream SshBytes) returns (stream SshBytes) {}
 }

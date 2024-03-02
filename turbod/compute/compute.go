@@ -3,15 +3,15 @@ package compute
 import (
 	"context"
 	"fmt"
+	"github.com/creack/pty"
 	"github.com/google/uuid"
 	grpc_auth "github.com/grpc-ecosystem/go-grpc-middleware/auth"
-	grpc_net_conn "github.com/hashicorp/go-grpc-net-conn"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/emptypb"
 	"io"
 	"os/exec"
+	"turbo_sched/common"
 	pb "turbo_sched/common/proto"
 )
 
@@ -28,38 +28,41 @@ type ComputeInterface struct {
 func (c *ComputeInterface) SshTunnel(server pb.Compute_SshTunnelServer) error {
 	s := server.Context().Value(Session).(computeSession)
 
-	fieldFunc := func(msg proto.Message) *[]byte {
-		return &msg.(*pb.SshBytes).Data
-	}
-	netConn := &grpc_net_conn.Conn{
-		Stream:   server,
-		Request:  &pb.SshBytes{},
-		Response: &pb.SshBytes{},
-		Encode:   grpc_net_conn.SimpleEncoder(fieldFunc),
-		Decode:   grpc_net_conn.SimpleDecoder(fieldFunc),
-	}
+	netConn, attrUpdateChan := common.NewGrpcConn(server)
 
 	// piping the netConn with the stdin/stdout/stderr of the command
 	cmd := exec.Command(s.assignInfo.CommandLine.Program, s.assignInfo.CommandLine.Args...)
 	cmd.Env = append(cmd.Env, s.assignInfo.CommandLine.Env...)
 
-	pout, _ := cmd.StdoutPipe()
-	pin, _ := cmd.StdinPipe()
-	perr, _ := cmd.StderrPipe()
-	cmd.Start()
+	// wait the first window size update
+	windowEvent, err := server.Recv()
+	window := windowEvent.GetAttributeUpdate().GetWindowSize()
+	if window == nil {
+		return fmt.Errorf("first message should be a window size update")
+	}
+	println("Window size:", window.Rows, window.Columns)
+	f, err := pty.StartWithSize(cmd, &pty.Winsize{
+		Rows: uint16(window.Rows),
+		Cols: uint16(window.Columns),
+	})
 	go func() {
-		_, err := io.Copy(pin, netConn)
+		_, err := io.Copy(f, netConn)
 		if err != nil {
 			panic(err)
 		}
 	}()
 	go func() {
-		_, err := io.Copy(netConn, perr)
-		if err != nil {
-			panic(err)
+		for attribute := range attrUpdateChan {
+			if windowSize := attribute.GetWindowSize(); windowSize != nil {
+				println("New Window size:", windowSize.Rows, windowSize.Columns)
+				pty.Setsize(f, &pty.Winsize{
+					Rows: uint16(windowSize.Rows),
+					Cols: uint16(windowSize.Columns),
+				})
+			}
 		}
 	}()
-	_, err := io.Copy(netConn, pout)
+	_, err = io.Copy(netConn, f)
 	if err != nil {
 		panic(err)
 	}

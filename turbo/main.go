@@ -3,17 +3,19 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/creack/pty"
 	"github.com/grpc-ecosystem/go-grpc-middleware/util/metautils"
-	grpc_net_conn "github.com/hashicorp/go-grpc-net-conn"
 	"github.com/spf13/viper"
+	"golang.org/x/term"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	grpcMetadata "google.golang.org/grpc/metadata"
-	"google.golang.org/protobuf/proto"
 	"io"
 	"log"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 	"turbo_sched/common"
 	pb "turbo_sched/common/proto"
 )
@@ -49,8 +51,7 @@ func main() {
 
 	stream, err := client.SubmitNewTaskInteractive(context.Background(), &pb.TaskSubmitInfo{
 		CommandLine: &pb.CommandLine{
-			Program: "python",
-			Args:    []string{"-i"},
+			Program: "btop",
 		},
 		DeviceRequirement: 1,
 	})
@@ -81,18 +82,57 @@ func main() {
 				panic(err)
 			}
 
-			fieldFunc := func(msg proto.Message) *[]byte {
-				return &msg.(*pb.SshBytes).Data
+			netConn, _ := common.NewGrpcConn(sshStream)
+
+			// send window size
+			r, c, _ := pty.Getsize(os.Stdin)
+			err = sshStream.Send(&pb.SshBytes{
+				Data: &pb.SshBytes_AttributeUpdate{
+					AttributeUpdate: &pb.SshBytes_SshAttributeUpdate{
+						Update: &pb.SshBytes_SshAttributeUpdate_WindowSize_{
+							WindowSize: &pb.SshBytes_SshAttributeUpdate_WindowSize{
+								Rows:    uint32(r),
+								Columns: uint32(c),
+							},
+						},
+					},
+				},
+			})
+			if err != nil {
+				panic(err)
 			}
-			netConn := &grpc_net_conn.Conn{
-				Stream:   sshStream,
-				Request:  &pb.SshBytes{},
-				Response: &pb.SshBytes{},
-				Encode:   grpc_net_conn.SimpleEncoder(fieldFunc),
-				Decode:   grpc_net_conn.SimpleDecoder(fieldFunc),
-			}
+			println("Window size sent")
+
+			// Handle pty size.
+			ch := make(chan os.Signal, 1)
+			signal.Notify(ch, syscall.SIGWINCH)
+			go func() {
+				for range ch {
+					r, c, _ := pty.Getsize(os.Stdin)
+					err = sshStream.Send(&pb.SshBytes{
+						Data: &pb.SshBytes_AttributeUpdate{
+							AttributeUpdate: &pb.SshBytes_SshAttributeUpdate{
+								Update: &pb.SshBytes_SshAttributeUpdate_WindowSize_{
+									WindowSize: &pb.SshBytes_SshAttributeUpdate_WindowSize{
+										Rows:    uint32(r),
+										Columns: uint32(c),
+									},
+								},
+							},
+						},
+					})
+					if err != nil {
+						panic(err)
+					}
+				}
+			}()
 
 			// piping the netConn with the stdin/stdout/stderr
+			oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+			if err != nil {
+				panic(err)
+			}
+			defer func() { _ = term.Restore(int(os.Stdin.Fd()), oldState) }()
 			go func() {
 				_, err := io.Copy(netConn, os.Stdin)
 				if err != nil {
