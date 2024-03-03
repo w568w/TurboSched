@@ -65,15 +65,18 @@ message TaskReportInfo {
     bytes output = 1;
     int32 exitCode = 2;
   }
-
   message TaskReadyForAttach {
     string token = 1;
+  }
+  message TaskError {
+    string message = 1;
   }
   TaskId id = 1;
 
   oneof event {
     TaskExited exited = 2;
     TaskReadyForAttach readyForAttach = 3;
+    TaskError error = 4;
   }
 }
 

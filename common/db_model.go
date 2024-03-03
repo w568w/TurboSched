@@ -48,6 +48,8 @@ const (
 	Running
 	// the task has exited
 	Exited
+	// the task has an error
+	Errored
 )
 
 type TaskModel struct {
@@ -57,6 +59,7 @@ type TaskModel struct {
 	DeviceRequirements uint32
 	DeviceModels       []*DeviceModel `gorm:"many2many:device_task;"`
 	Interactive        bool
+	ErrorMessage       string
 }
 
 // impl Task for TaskModel

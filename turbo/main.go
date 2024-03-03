@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/creack/pty"
+	"github.com/dixonwille/wlog/v3"
 	"github.com/grpc-ecosystem/go-grpc-middleware/util/metautils"
 	"github.com/ross96D/cancelreader"
 	"github.com/spf13/viper"
@@ -14,7 +15,6 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	grpcMetadata "google.golang.org/grpc/metadata"
 	"io"
-	"log"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -32,7 +32,11 @@ func ctxWithToken(ctx context.Context, scheme string, token string) context.Cont
 	return metautils.NiceMD(md).ToOutgoing(ctx)
 }
 
+var Glog wlog.UI
+
 func main() {
+	Glog = common.SetupCLILogger()
+
 	common.SetupConfigNameAndPaths(slog.Default(), AppName, "config")
 	if err := viper.ReadInConfig(); err != nil {
 		panic(err)
@@ -46,19 +50,26 @@ func main() {
 	}
 	conn, err := grpc.Dial(fmt.Sprintf("%s:%d", globalConfig.Controller.Addr, globalConfig.Controller.Port), opts...)
 	if err != nil {
+		Glog.Error("cannot connect to controller")
 		panic(err)
 	}
-	defer conn.Close()
+	defer func(conn *grpc.ClientConn) {
+		err := conn.Close()
+		if err != nil {
+			Glog.Error(fmt.Sprintf("cannot close connection to controller: %v", err))
+		}
+	}(conn)
 
 	client := pb.NewControllerClient(conn)
 
 	stream, err := client.SubmitNewTaskInteractive(context.Background(), &pb.TaskSubmitInfo{
 		CommandLine: &pb.CommandLine{
-			Program: "btop",
+			Program: "ls",
 		},
 		DeviceRequirement: 1,
 	})
 	if err != nil {
+		Glog.Error("cannot submit the task")
 		panic(err)
 	}
 
@@ -68,11 +79,15 @@ func main() {
 			break
 		}
 		if err != nil {
-			log.Panicf("%v.SubmitNewTaskInteractive(_) = _, %v", client, err)
+			Glog.Error("error waiting for controller")
+			panic(err)
 		}
-		log.Println(event)
 		if readyForAttach := event.GetReadyForAttach(); readyForAttach != nil {
+			Glog.Success("Node is ready. Attaching...")
 			interactiveTaskMain(readyForAttach)
+		} else if taskId := event.GetObtainedId(); taskId != nil {
+			Glog.Success(fmt.Sprintf("Task submitted with id: %d", taskId.Id))
+			Glog.Running("Queueing for node allocation...")
 		}
 	}
 }
@@ -82,15 +97,22 @@ func interactiveTaskMain(readyForAttach *pb.TaskEvent_ReadyForAttach) {
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	}
 	conn, err := grpc.Dial(fmt.Sprintf("%s:%d", readyForAttach.ConnInfos[0].Host, readyForAttach.ConnInfos[0].Port), opts...)
+	defer func(conn *grpc.ClientConn) {
+		err := conn.Close()
+		if err != nil {
+			Glog.Error(fmt.Sprintf("cannot close connection to compute node: %v", err))
+		}
+	}(conn)
 	if err != nil {
+		Glog.Error("cannot connect to compute node")
 		panic(err)
 	}
-	defer conn.Close()
 
 	computeClient := pb.NewComputeClient(conn)
 
 	sshStream, err := computeClient.SshTunnel(ctxWithToken(context.Background(), "bearer", readyForAttach.ConnInfos[0].Token))
 	if err != nil {
+		Glog.Error("cannot open terminal channel with compute node")
 		panic(err)
 	}
 
@@ -110,11 +132,12 @@ func interactiveTaskMain(readyForAttach *pb.TaskEvent_ReadyForAttach) {
 		},
 	})
 	if err != nil {
+		Glog.Error("cannot send terminal info to compute node")
 		panic(err)
 	}
-	println("Window size sent")
 
 	exitCodeChan := make(chan int32, 1)
+	pipingErrChan := make(chan error, 3)
 	// Handle pty size.
 	sizeChangedSig := make(chan os.Signal, 1)
 	signal.Notify(sizeChangedSig, syscall.SIGWINCH)
@@ -141,8 +164,7 @@ func interactiveTaskMain(readyForAttach *pb.TaskEvent_ReadyForAttach) {
 					},
 				})
 				if err != nil {
-					// TODO: log error to console
-					println("error sending window size")
+					Glog.Warn(fmt.Sprintf("cannot send terminal info to compute node: %v", err))
 				}
 			}
 		}
@@ -151,7 +173,7 @@ func interactiveTaskMain(readyForAttach *pb.TaskEvent_ReadyForAttach) {
 	// piping the netConn with the stdin/stdout/stderr
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
-		panic(err)
+		Glog.Warn(fmt.Sprintf("cannot set up terminal into raw mode: %v", err))
 	}
 	defer func() { _ = term.Restore(int(os.Stdin.Fd()), oldState) }()
 	var eg errgroup.Group
@@ -161,22 +183,36 @@ func interactiveTaskMain(readyForAttach *pb.TaskEvent_ReadyForAttach) {
 	}
 	eg.Go(func() error {
 		_, err := io.Copy(netConn, cancelableStdin)
+		pipingErrChan <- err
 		return err
 	})
 	eg.Go(func() error {
 		_, err := io.Copy(os.Stdout, netConn)
+		pipingErrChan <- err
 		return err
 	})
 
-	// wait for the command to exit
-	exitCode := <-exitCodeChan
-	println("Command exited with code", exitCode)
-	// cancel the piping stdin
-	cancelableStdin.Cancel()
-	// close the sshStream
-	netConn.Close()
-	// wait for the io.Copy to finish
-	if err := eg.Wait(); !errors.Is(err, cancelreader.ErrCanceled) && !errors.Is(err, io.EOF) {
-		panic(err)
+	// wait for error occurred or exit status received
+	for {
+		select {
+		case exitCode := <-exitCodeChan: // if receiving exit status, break the loop
+			Glog.Info(fmt.Sprintf("Task exited with code %d", exitCode))
+			// cancel the piping stdin
+			cancelableStdin.Cancel()
+			// close the sshStream
+			err = netConn.Close()
+			if err != nil {
+				Glog.Warn(fmt.Sprintf("cannot close the channel: %v", err))
+			}
+			// wait for the io.Copy to finish
+			if err := eg.Wait(); !errors.Is(err, cancelreader.ErrCanceled) && !errors.Is(err, io.EOF) {
+				panic(err)
+			}
+			return
+		case err = <-pipingErrChan: // if receiving error, only break the loop if it is abnormal
+			if !errors.Is(err, cancelreader.ErrCanceled) && !errors.Is(err, io.EOF) {
+				panic(err)
+			}
+		}
 	}
 }

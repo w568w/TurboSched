@@ -2,6 +2,7 @@ package common
 
 import (
 	"fmt"
+	"github.com/dixonwille/wlog/v3"
 	"io"
 	"log"
 	"log/slog"
@@ -64,4 +65,28 @@ func SetupLogger() *slog.Logger {
 	}
 
 	return logger
+}
+
+// SetupCLILogger sets up a logger for command line interface (CLI) applications, e.g. turbo.
+func SetupCLILogger() wlog.UI {
+	if !IsDebug() {
+		// mute the default logger if not in debug mode
+		log.SetOutput(io.Discard)
+	}
+
+	var ui wlog.UI = wlog.New(os.Stdin, os.Stderr, os.Stderr)
+	if runtime.GOOS == "windows" {
+		// Windows console does not support some unicode characters
+		ui = wlog.AddPrefix("?", "x", " ", "", "", "~", "$", "!", ui)
+	} else {
+		ui = wlog.AddPrefix("?", wlog.Cross, " ", "", "", "~", wlog.Check, "!", ui)
+	}
+	if supportscolor.Stdout().SupportsColor {
+		ui = wlog.AddColor(wlog.White, wlog.Red, wlog.White, wlog.White, wlog.White, wlog.Magenta, wlog.Blue, wlog.Green, wlog.Yellow, ui)
+	} else {
+		ui.Info("No color support detected. Using plain text to output.")
+	}
+
+	ui = wlog.AddConcurrent(ui)
+	return ui
 }

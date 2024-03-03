@@ -225,6 +225,7 @@ func (c *ControlInterface) ReportTask(ctx context.Context, info *pb.TaskReportIn
 			Status: common.Exited,
 		}
 		c.Glog.Info(fmt.Sprintf("Task %d exited with code %d:\n%s", info.Id.Id, exitedStatus.ExitCode, exitedStatus.Output))
+		// FIXME change state in a transaction
 		result := c.Database.Model(&task).Select("Status").Updates(task)
 		if result.Error != nil {
 			return nil, result.Error
@@ -272,6 +273,29 @@ func (c *ControlInterface) ReportTask(ctx context.Context, info *pb.TaskReportIn
 					},
 				},
 			},
+		})
+	} else if err := info.GetError(); err != nil {
+		task := common.TaskModel{
+			ID:           info.Id.Id,
+			Status:       common.Errored,
+			ErrorMessage: err.Message,
+		}
+		result := c.Database.Model(&task).Select("Status", "ErrorMessage").Updates(task)
+		if result.Error != nil {
+			return nil, result.Error
+		}
+
+		// set device to idle
+		result = c.Database.Model(&common.DeviceModel{}).
+			Where(&common.DeviceModel{Status: int64(info.Id.Id)}, "Status").
+			Update("Status", common.Idle)
+		if result.Error != nil {
+			return nil, result.Error
+		}
+
+		c.taskSub.Publish(info.Id.Id, TaskEvent{
+			NewStatus: common.Errored,
+			ExtraData: err,
 		})
 	} else {
 		return nil, errors.New("unknown report type")

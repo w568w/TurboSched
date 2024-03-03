@@ -168,7 +168,7 @@ func computeMain() {
 
 	client := pb.NewControllerClient(conn)
 
-	computeInterface := compute.NewComputeInterface(client)
+	computeInterface := compute.NewComputeInterface(client, Glog)
 
 	l, err := net.Listen("tcp", ":0")
 	if err != nil {
@@ -199,6 +199,7 @@ func computeMain() {
 	if err != nil {
 		panic(err)
 	}
+	Glog.Info("Node checked in with controller")
 	if err = eg.Wait(); err != nil {
 		panic(err)
 	}
