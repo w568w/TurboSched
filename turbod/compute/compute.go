@@ -69,6 +69,7 @@ func (c *ComputeInterface) SshTunnel(server pb.Compute_SshTunnelServer) error {
 	// piping the netConn with the stdin/stdout/stderr of the command
 	cmd := exec.Command(s.assignInfo.CommandLine.Program, s.assignInfo.CommandLine.Args...)
 	cmd.Env = append(cmd.Env, s.assignInfo.CommandLine.Env...)
+	cmd.Dir = s.assignInfo.CommandLine.Cwd
 
 	// wait the first window size update
 	windowEvent, err := server.Recv()

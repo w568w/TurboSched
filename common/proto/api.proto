@@ -34,6 +34,7 @@ message CommandLine {
   string program = 1;
   repeated string args = 2;
   repeated string env = 3;
+  string cwd = 4;
 }
 
 // User sends TaskSubmitInfo to the controller to submit a new task.

@@ -62,9 +62,17 @@ func main() {
 
 	client := pb.NewControllerClient(conn)
 
+	cwd, err := os.Getwd()
+	if err != nil {
+		Glog.Warn(fmt.Sprintf("cannot get current working directory, using empty string as default: %v", err))
+		cwd = ""
+	}
 	stream, err := client.SubmitNewTaskInteractive(context.Background(), &pb.TaskSubmitInfo{
 		CommandLine: &pb.CommandLine{
-			Program: "ls",
+			Program: os.Args[1],
+			Args:    os.Args[2:],
+			Env:     os.Environ(),
+			Cwd:     cwd,
 		},
 		DeviceRequirement: 1,
 	})

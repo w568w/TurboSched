@@ -12,6 +12,7 @@ type RawCommandLine struct {
 	Program string
 	Args    []string
 	Env     []string
+	Cwd     string
 }
 
 func ToRawCommandLine(cmdLine *pb.CommandLine) RawCommandLine {
@@ -19,6 +20,7 @@ func ToRawCommandLine(cmdLine *pb.CommandLine) RawCommandLine {
 		Program: cmdLine.Program,
 		Args:    cmdLine.Args,
 		Env:     cmdLine.Env,
+		Cwd:     cmdLine.Cwd,
 	}
 }
 
@@ -27,6 +29,7 @@ func (r *RawCommandLine) ToCommandLine() *pb.CommandLine {
 		Program: r.Program,
 		Args:    r.Args,
 		Env:     r.Env,
+		Cwd:     r.Cwd,
 	}
 }
 
