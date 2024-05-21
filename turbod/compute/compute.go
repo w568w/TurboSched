@@ -100,11 +100,12 @@ func (c *ComputeInterface) SshTunnel(server pb.Compute_SshTunnelServer) error {
 		_, err = io.Copy(netConn, f)
 		return err
 	})
-	eg.Go(func() error {
+	go func() {
+		errCnt := 0
 		for {
 			select {
 			case <-procExited:
-				return nil
+				return
 			case attribute := <-attrUpdateChan:
 				if windowSize := attribute.GetWindowSize(); windowSize != nil {
 					err := pty.Setsize(f, &pty.Winsize{
@@ -112,13 +113,17 @@ func (c *ComputeInterface) SshTunnel(server pb.Compute_SshTunnelServer) error {
 						Cols: uint16(windowSize.Columns),
 					})
 					if err != nil {
-						c.Glog.Warn("Failed to set window size", err)
-						return err
+						errCnt++
+						if errCnt == 1 {
+							c.Glog.Warn("Failed to set window size", err)
+						} else if common.IsPowerOfTwo(errCnt) {
+							c.Glog.Warn(fmt.Sprintf("Failed to set window size for %d times", errCnt), err)
+						}
 					}
 				}
 			}
 		}
-	})
+	}()
 	execErr := cmd.Wait()
 	procExited <- true
 	if execErr != nil {
