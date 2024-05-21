@@ -86,6 +86,21 @@ func main() {
 		Glog.Warn(fmt.Sprintf("cannot get current working directory, using empty string as default: %v", err))
 		cwd = ""
 	}
+
+	if os.Args[1] == "stop" {
+		id, err := strconv.ParseUint(os.Args[2], 10, 64)
+		if err != nil {
+			Glog.Error("cannot parse the task id")
+			panic(err)
+		}
+		_, err = client.CancelTask(context.Background(), &pb.TaskId{Id: id})
+		if err != nil {
+			Glog.Error("cannot cancel the task")
+			panic(err)
+		}
+		Glog.Success(fmt.Sprintf("Task %d has been cancelled", id))
+		return
+	}
 	stream, err := client.SubmitNewTaskInteractive(context.Background(), &pb.TaskSubmitInfo{
 		CommandLine: &pb.CommandLine{
 			Program: os.Args[1],
