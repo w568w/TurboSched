@@ -18,6 +18,8 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"turbo_sched/common"
 	pb "turbo_sched/common/proto"
@@ -33,6 +35,23 @@ func ctxWithToken(ctx context.Context, scheme string, token string) context.Cont
 }
 
 var Glog wlog.UI
+
+func askYesNo(question string) (bool, error) {
+	for {
+		input, err := Glog.Ask(question+" (y/n) ", " ")
+		if err != nil {
+			return false, err
+		}
+		lowerInput := strings.ToLower(input)
+		if lowerInput == "y" {
+			return true, nil
+		} else if lowerInput == "n" {
+			return false, nil
+		} else {
+			Glog.Error(fmt.Sprintf("Invalid input: %s", input))
+		}
+	}
+}
 
 func main() {
 	Glog = common.SetupCLILogger()
@@ -81,21 +100,52 @@ func main() {
 		panic(err)
 	}
 
+	ctrlcChan := make(chan os.Signal, 1)
+	signal.Notify(ctrlcChan, os.Interrupt)
+
+forLoop:
 	for {
-		event, err := stream.Recv()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			Glog.Error("error waiting for controller")
-			panic(err)
-		}
-		if readyForAttach := event.GetReadyForAttach(); readyForAttach != nil {
-			Glog.Success("Node is ready. Attaching...")
-			interactiveTaskMain(readyForAttach)
-		} else if taskId := event.GetObtainedId(); taskId != nil {
-			Glog.Success(fmt.Sprintf("Task submitted with id: %d", taskId.Id))
-			Glog.Running("Queueing for node allocation...")
+		nextEventChan := make(chan struct {
+			*pb.TaskEvent
+			error
+		}, 1)
+		go func() {
+			event, err := stream.Recv()
+			nextEventChan <- struct {
+				*pb.TaskEvent
+				error
+			}{event, err}
+			close(nextEventChan)
+		}()
+		select {
+		case <-ctrlcChan:
+			toExit, err := askYesNo("Do you want to cancel the task?")
+			if err != nil {
+				Glog.Error("error asking for user input")
+				panic(err)
+			}
+			if toExit {
+
+			}
+			return
+		case eventAndErr := <-nextEventChan:
+			event := eventAndErr.TaskEvent
+			err := eventAndErr.error
+			if errors.Is(err, io.EOF) {
+				break forLoop
+			}
+			if err != nil {
+				Glog.Error("error waiting for controller")
+				panic(err)
+			}
+			if readyForAttach := event.GetReadyForAttach(); readyForAttach != nil {
+				Glog.Success("Node is ready. Attaching...")
+				interactiveTaskMain(readyForAttach)
+				break forLoop
+			} else if taskId := event.GetObtainedId(); taskId != nil {
+				Glog.Success(fmt.Sprintf("Task submitted with id: %d", taskId.Id))
+				Glog.Running("Queueing for node allocation...")
+			}
 		}
 	}
 }
