@@ -107,6 +107,7 @@ service Controller {
   rpc ReportTask(TaskReportInfo) returns (google.protobuf.Empty) {}
   rpc SubmitNewTask(TaskSubmitInfo) returns (TaskId) {}
   rpc SubmitNewTaskInteractive(TaskSubmitInfo) returns (stream TaskEvent) {}
+  rpc CancelTask(TaskId) returns (google.protobuf.Empty) {}
 }
 
 service Compute {
