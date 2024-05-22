@@ -1,5 +1,9 @@
 package common
 
+import (
+	"context"
+)
+
 // Some misc functions that are used in multiple places, but don't really belong
 // anywhere else.
 
@@ -29,4 +33,29 @@ func RemoveUnordered[S ~[]E, E any](input S, index int) (S, E) {
 	removed := input[index]
 	input[index] = input[len(input)-1]
 	return input[:len(input)-1], removed
+}
+
+// IsPowerOfTwo returns true if the given positive number is a power of two.
+func IsPowerOfTwo(n int) bool {
+	return n > 0 && n&(n-1) == 0
+}
+
+// WithBothCxt merges two contexts into one. If one context is canceled, the returned context will be canceled as well.
+// Additionally, both contexts are canceled when mergeCancel is called.
+//
+// Special behavior:
+// If ctx1 has already been canceled, mergedContext will be canceled immediately;
+// if ctx2 has already been canceled, mergedContext will be canceled in a goroutine immediately.
+func WithBothCxt(ctx1, ctx2 context.Context) (mergedContext context.Context, mergeCancel context.CancelFunc) {
+	wrappedCtx1, cancelWrappedCtx1 := context.WithCancelCause(ctx1)
+	cancelWrappedCtx2 := context.AfterFunc(ctx2, func() {
+		cancelWrappedCtx1(context.Cause(ctx2))
+	})
+	return wrappedCtx1, func() {
+		cancelWrappedCtx2()
+		// it is necessary to call cancelWrappedCtx1 again,
+		// because cancelWrappedCtx2 can fail if ctx2 is already canceled.
+		// In that case, cancelWrappedCtx1 in AfterFunc will not be called.
+		cancelWrappedCtx1(context.Canceled)
+	}
 }
