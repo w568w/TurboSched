@@ -67,7 +67,7 @@ func main() {
 	opts := []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	}
-	conn, err := grpc.Dial(fmt.Sprintf("%s:%d", globalConfig.Controller.Addr, globalConfig.Controller.Port), opts...)
+	conn, err := grpc.NewClient(fmt.Sprintf("%s:%d", globalConfig.Controller.Addr, globalConfig.Controller.Port), opts...)
 	if err != nil {
 		Glog.Error("cannot connect to controller")
 		panic(err)
@@ -169,7 +169,7 @@ func interactiveTaskMain(readyForAttach *pb.TaskEvent_ReadyForAttach) {
 	opts := []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	}
-	conn, err := grpc.Dial(fmt.Sprintf("%s:%d", readyForAttach.ConnInfos[0].Host, readyForAttach.ConnInfos[0].Port), opts...)
+	conn, err := grpc.NewClient(fmt.Sprintf("%s:%d", readyForAttach.ConnInfos[0].Host, readyForAttach.ConnInfos[0].Port), opts...)
 	defer func(conn *grpc.ClientConn) {
 		err := conn.Close()
 		if err != nil {
