@@ -2,6 +2,7 @@ package compute
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/creack/pty"
 	"github.com/failsafe-go/failsafe-go"
@@ -127,9 +128,13 @@ func (c *ComputeInterface) SshTunnel(server pb.Compute_SshTunnelServer) error {
 	execErr := cmd.Wait()
 	procExited <- true
 	if execErr != nil {
-		// there is really something wrong.
-		c.reportErrorTaskAsync(s.assignInfo.Id, execErr)
-		return execErr
+		// is there something error, or just the command exited with non-zero code?
+		println(fmt.Sprintf("Command failed: %+v", execErr))
+		var exitError *exec.ExitError
+		if !errors.As(execErr, &exitError) {
+			c.reportErrorTaskAsync(s.assignInfo.Id, execErr)
+			return execErr
+		}
 	}
 	// tell the client we are done, so that it will close remote connection
 	err = server.Send(&pb.SshBytes{
