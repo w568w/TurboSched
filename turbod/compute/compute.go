@@ -71,7 +71,7 @@ func (c *ComputeInterface) SshTunnel(server pb.Compute_SshTunnelServer) error {
 		return context.Canceled
 	}
 
-	cxt := canceler.RoutineRegister(server.Context())
+	cxt := canceler.RoutineRegister(nil)
 	defer canceler.RoutineUnregister()
 
 	procExited := make(chan struct{})
@@ -161,6 +161,11 @@ forloop:
 					c.Glog.Warn("Failed to kill the process", err)
 				}
 				alreadySentKilled = true
+			case <-server.Context().Done():
+				if err = cmd.Process.Kill(); err != nil {
+					c.Glog.Warn("Failed to kill the process", err)
+				}
+				alreadySentKilled = true
 			case _, _ = <-procExited:
 				break forloop
 			}
@@ -203,8 +208,10 @@ forloop:
 		// TODO we don't know for now. Just log it.
 		c.Glog.Debug("Piping error", pipingErr)
 	}
-	// tell the controller we are done, if we are not being cancelled
-	if !alreadySentKilled {
+
+	// if we are not being canceled, tell the controller we are done;
+	// if we are being canceled, nothing should be sent to prevent deadlock.
+	if cxt.Err() == nil {
 		result := c.reportExitedTaskAsync(s.assignInfo.Id, int32(cmd.ProcessState.ExitCode()), nil)
 		if err := result.Error(); err != nil {
 			return err
