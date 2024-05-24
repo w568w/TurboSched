@@ -50,6 +50,8 @@ const (
 	Exited
 	// the task has an error
 	Errored
+	// the task has been canceled
+	Canceled
 )
 
 type TaskModel struct {

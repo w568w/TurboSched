@@ -95,7 +95,7 @@ func main() {
 		}
 		_, err = client.CancelTask(context.Background(), &pb.TaskId{Id: id})
 		if err != nil {
-			Glog.Error("cannot cancel the task")
+			Glog.Error(fmt.Sprintf("Cannot cancel the task: %v", err))
 			panic(err)
 		}
 		Glog.Success(fmt.Sprintf("Task %d has been cancelled", id))
@@ -150,6 +150,10 @@ forLoop:
 				break forLoop
 			}
 			if err != nil {
+				if common.IsGrpcCanceled(err) {
+					Glog.Info("Task has been cancelled")
+					break forLoop
+				}
 				Glog.Error("error waiting for controller")
 				panic(err)
 			}

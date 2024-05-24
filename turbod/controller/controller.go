@@ -22,7 +22,8 @@ type ControlInterface struct {
 	Database    *gorm.DB
 	taskPool    *common.TaskPool
 	devicePool  *common.DevicePool
-	taskSub     *common.EventBus[uint64]
+	taskSub     *common.EventBus[uint64] // TODO: replace with a stated channel
+	taskCancel  map[uint64]*common.TaskCanceler
 	connections map[string]pb.ComputeClient
 	Glog        *slog.Logger
 	pb.UnimplementedControllerServer
@@ -45,6 +46,7 @@ func NewControlInterface(db *gorm.DB, logger *slog.Logger) *ControlInterface {
 		taskPool:    common.NewTaskPool(db, schedCond),
 		devicePool:  common.NewDevicePool(db, schedCond),
 		taskSub:     common.NewEventBus[uint64](),
+		taskCancel:  make(map[uint64]*common.TaskCanceler),
 		connections: make(map[string]pb.ComputeClient),
 		Glog:        logger,
 	}
@@ -63,11 +65,20 @@ func NewControlInterface(db *gorm.DB, logger *slog.Logger) *ControlInterface {
 				}
 				panic(result.Error)
 			}
+			canceler := c.taskCancel[nextTask.ID]
+			if canceler.HasCanceled() {
+				schedCond.L.Unlock()
+				continue
+			}
+
+			canceler.RoutineRegister(nil)
+
 			var nodeWithAvailDevices []common.NodeModel
 			result = c.Database.Model(&common.NodeModel{}).
 				Preload("Devices", c.Database.Where(&common.DeviceModel{Status: common.Idle}, "Status")).
 				Find(&nodeWithAvailDevices)
 			if result.Error != nil {
+				canceler.RoutineUnregister()
 				schedCond.L.Unlock()
 				panic(result.Error)
 			}
@@ -86,6 +97,7 @@ func NewControlInterface(db *gorm.DB, logger *slog.Logger) *ControlInterface {
 
 			if pickNode == nil {
 				fmt.Println("No enough devices for task", nextTask.ID)
+				canceler.RoutineUnregister()
 				schedCond.L.Unlock()
 				continue
 			}
@@ -103,10 +115,12 @@ func NewControlInterface(db *gorm.DB, logger *slog.Logger) *ControlInterface {
 				return nil
 			})
 			if err != nil {
+				canceler.RoutineUnregister()
 				schedCond.L.Unlock()
 				panic(err)
 			}
 
+			canceler.RoutineUnregister()
 			schedCond.L.Unlock()
 
 			c.taskSub.Publish(nextTask.ID, TaskEvent{
@@ -130,29 +144,45 @@ func (c *ControlInterface) submitNewTask(taskInfo *pb.TaskSubmitInfo, interactiv
 	if err != nil {
 		return 0, err
 	}
+	c.taskCancel[id] = common.NewTaskCanceler(false)
 
 	return id, nil
 }
 
-func (c *ControlInterface) executeTask(task *common.TaskModel, node *common.NodeModel, deviceModels []*common.DeviceModel) {
-	fmt.Println("executeTask", task.ID, node.Name, deviceModels)
-
+func (c *ControlInterface) getComputeClient(cxt context.Context, node *common.NodeModel) (pb.ComputeClient, error) {
 	if c.connections[node.Name] == nil {
 		opts := []grpc.DialOption{
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
 		}
-		conn, err := grpc.Dial(net.JoinHostPort(node.Addr, fmt.Sprintf("%d", node.Port)), opts...)
+		conn, err := grpc.DialContext(cxt, net.JoinHostPort(node.Addr, fmt.Sprintf("%d", node.Port)), opts...)
 		if err != nil {
-			panic(err)
+			return nil, err
 		}
 		computeClient := pb.NewComputeClient(conn)
 		c.connections[node.Name] = computeClient
 	}
+	return c.connections[node.Name], nil
+}
 
-	realClient := c.connections[node.Name]
+func (c *ControlInterface) executeTask(task *common.TaskModel, node *common.NodeModel, deviceModels []*common.DeviceModel) {
+	fmt.Println("executeTask", task.ID, node.Name, deviceModels)
+	canceler := c.taskCancel[task.ID]
+	if canceler.HasCanceled() {
+		return
+	}
+	cxt := canceler.RoutineRegister(nil)
+	defer canceler.RoutineUnregister()
+
+	realClient, err := c.getComputeClient(cxt, node)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
+		panic(err)
+	}
 
 	cmdLine := task.CommandLine.Data()
-	_, err := realClient.TaskAssign(context.Background(), &pb.TaskAssignInfo{
+	_, err = realClient.TaskAssign(cxt, &pb.TaskAssignInfo{
 		Id:          &pb.TaskId{Id: task.ID},
 		CommandLine: cmdLine.ToCommandLine(),
 		DeviceUuids: common.Map(deviceModels, func(device *common.DeviceModel) string {
@@ -161,6 +191,9 @@ func (c *ControlInterface) executeTask(task *common.TaskModel, node *common.Node
 		Interactive: task.Interactive,
 	})
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
 		panic(err)
 	}
 
@@ -219,7 +252,19 @@ func (c *ControlInterface) CheckInNode(ctx context.Context, nodeInfo *pb.NodeInf
 }
 
 func (c *ControlInterface) ReportTask(ctx context.Context, info *pb.TaskReportInfo) (*emptypb.Empty, error) {
-	if exitedStatus := info.GetExited(); exitedStatus != nil {
+	canceler, ok := c.taskCancel[info.Id.Id]
+	if !ok {
+		return nil, errors.New("task not found")
+	}
+	exitedStatus := info.GetExited()
+	err := info.GetError()
+	// only cancel if the task is not exiting or errored. otherwise, we can just let it go
+	if canceler.HasCanceled() && exitedStatus == nil && err == nil {
+		return nil, context.Canceled
+	}
+	_ = canceler.RoutineRegister(ctx)
+	defer canceler.RoutineUnregister()
+	if exitedStatus != nil {
 		task := common.TaskModel{
 			ID:     info.Id.Id,
 			Status: common.Exited,
@@ -323,6 +368,12 @@ func (c *ControlInterface) SubmitNewTaskInteractive(taskInfo *pb.TaskSubmitInfo,
 	}
 	notification := c.taskSub.Subscribe(id, 0)
 	defer c.taskSub.Unsubscribe(id, notification)
+	canceler := c.taskCancel[id]
+	if canceler.HasCanceled() {
+		return context.Canceled
+	}
+	cxt := canceler.RoutineRegister(nil)
+	defer canceler.RoutineUnregister()
 	for {
 		select {
 		case event, ok := <-notification:
@@ -344,4 +395,97 @@ func (c *ControlInterface) SubmitNewTaskInteractive(taskInfo *pb.TaskSubmitInfo,
 			}
 		}
 	}
+		case <-cxt.Done():
+			return cxt.Err()
+		}
+	}
+}
+
+func (c *ControlInterface) CancelTask(ctx context.Context, id *pb.TaskId) (*emptypb.Empty, error) {
+	canceler, ok := c.taskCancel[id.Id]
+	if !ok {
+		// fixme: canceling an old task?
+		return nil, errors.New("task not found")
+	}
+	if canceler.HasCanceled() {
+		return nil, errors.New("task already canceled")
+	}
+	ok = canceler.CancelAndWaitAllRoutine()
+	if !ok {
+		return nil, errors.New("task already canceled")
+	}
+
+	// clean up resources according to the task status
+	var task = common.TaskModel{ID: id.Id}
+	err := c.Database.First(&task).Error
+	if err != nil {
+		panic(err)
+	}
+
+	removeAndFreeDevice := func() error {
+		return c.Database.Transaction(func(tx *gorm.DB) error {
+			// set device to idle
+			err := tx.Model(&common.DeviceModel{}).
+				Where(&common.DeviceModel{Status: int64(id.Id)}, "Status").
+				Update("Status", common.Idle).Error
+			if err != nil {
+				return err
+			}
+			// set task to canceled
+			task.Status = common.Canceled
+			err = tx.Model(&task).Select("Status").Updates(task).Error
+			if err != nil {
+				return err
+			}
+
+			c.taskSub.Publish(task.ID, TaskEvent{
+				NewStatus: common.Canceled,
+				ExtraData: nil,
+			})
+			return nil
+		})
+	}
+	switch task.Status {
+	case common.Pending:
+		if err = removeAndFreeDevice(); err != nil {
+			panic(err)
+		}
+	case common.Submitting:
+		if err = removeAndFreeDevice(); err != nil {
+			panic(err)
+		}
+	case common.Attaching:
+		fallthrough
+	case common.Running:
+		// TODO change for multi-node scheduling
+		var deviceModels []common.DeviceModel
+		result := c.Database.Where(&common.DeviceModel{Status: int64(id.Id)}, "Status").Find(&deviceModels)
+		if result.Error != nil {
+			return nil, result.Error
+		}
+		node := common.NodeModel{Name: deviceModels[0].NodeModelName}
+		result = c.Database.First(&node)
+		realClient, err := c.getComputeClient(ctx, &node)
+		if err != nil {
+			if !errors.Is(err, context.Canceled) {
+				panic(err)
+			}
+		}
+		// tell the node to terminate the task
+		if _, err = realClient.TaskCancel(ctx, id); err != nil {
+			if !errors.Is(err, context.Canceled) {
+				panic(err)
+			}
+		}
+		if err = removeAndFreeDevice(); err != nil {
+			panic(err)
+		}
+	case common.Exited:
+		return nil, errors.New("task already exited")
+	case common.Errored:
+		return nil, errors.New("task already errored")
+	case common.Canceled:
+		return nil, errors.New("task already canceled")
+	}
+	return &emptypb.Empty{}, nil
 }

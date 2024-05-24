@@ -112,6 +112,7 @@ service Controller {
 
 service Compute {
   rpc TaskAssign(TaskAssignInfo) returns (google.protobuf.Empty) {}
+  rpc TaskCancel(TaskId) returns (google.protobuf.Empty) {}
   // the first message must be SshBytes.SshAttributeUpdate.WindowSize, or an error will be returned.
   rpc SshTunnel(stream SshBytes) returns (stream SshBytes) {}
 }

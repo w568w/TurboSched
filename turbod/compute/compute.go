@@ -26,7 +26,9 @@ type computeSession struct {
 
 type ComputeInterface struct {
 	ControlClient pb.ControllerClient
-	connMap       map[string]computeSession
+	connMap       common.DualMap[string, uint64, computeSession]
+	taskCancel    map[uint64]*common.TaskCanceler
+	taskStatus    map[uint64]common.TaskStatus
 	reporter      failsafe.Executor[any]
 	Glog          *slog.Logger
 	pb.UnimplementedComputeServer
@@ -64,7 +66,15 @@ func (c *ComputeInterface) reportExitedTaskAsync(id *pb.TaskId, exitCode int32, 
 func (c *ComputeInterface) SshTunnel(server pb.Compute_SshTunnelServer) error {
 	s := server.Context().Value(Session).(computeSession)
 
-	procExited := make(chan bool)
+	canceler := c.taskCancel[s.assignInfo.Id.Id]
+	if canceler.HasCanceled() {
+		return context.Canceled
+	}
+
+	cxt := canceler.RoutineRegister(server.Context())
+	defer canceler.RoutineUnregister()
+
+	procExited := make(chan struct{})
 	netConn, attrUpdateChan := common.NewGrpcConn(server)
 
 	// piping the netConn with the stdin/stdout/stderr of the command
@@ -84,6 +94,14 @@ func (c *ComputeInterface) SshTunnel(server pb.Compute_SshTunnelServer) error {
 		c.reportErrorTaskAsync(s.assignInfo.Id, err)
 		return err
 	}
+
+	// before we start the command, check cancellation again
+	if canceler.HasCanceled() {
+		return context.Canceled
+	}
+
+	c.taskStatus[s.assignInfo.Id.Id] = common.Running
+
 	f, err := pty.StartWithSize(cmd, &pty.Winsize{
 		Rows: uint16(window.Rows),
 		Cols: uint16(window.Columns),
@@ -125,8 +143,34 @@ func (c *ComputeInterface) SshTunnel(server pb.Compute_SshTunnelServer) error {
 			}
 		}
 	}()
-	execErr := cmd.Wait()
-	procExited <- true
+
+	var execErr error
+	go func() {
+		execErr = cmd.Wait()
+		close(procExited)
+	}()
+
+	// wait until the command exits
+	alreadySentKilled := false
+forloop:
+	for {
+		if !alreadySentKilled {
+			select {
+			case <-cxt.Done():
+				if err = cmd.Process.Kill(); err != nil {
+					c.Glog.Warn("Failed to kill the process", err)
+				}
+				alreadySentKilled = true
+			case _, _ = <-procExited:
+				break forloop
+			}
+		} else {
+			_, _ = <-procExited
+			break forloop
+		}
+	}
+	c.taskStatus[s.assignInfo.Id.Id] = common.Exited
+
 	if execErr != nil {
 		// is there something error, or just the command exited with non-zero code?
 		println(fmt.Sprintf("Command failed: %+v", execErr))
@@ -159,10 +203,12 @@ func (c *ComputeInterface) SshTunnel(server pb.Compute_SshTunnelServer) error {
 		// TODO we don't know for now. Just log it.
 		c.Glog.Debug("Piping error", pipingErr)
 	}
-	// tell the controller we are done
-	result := c.reportExitedTaskAsync(s.assignInfo.Id, int32(cmd.ProcessState.ExitCode()), nil)
-	if err := result.Error(); err != nil {
-		return err
+	// tell the controller we are done, if we are not being cancelled
+	if !alreadySentKilled {
+		result := c.reportExitedTaskAsync(s.assignInfo.Id, int32(cmd.ProcessState.ExitCode()), nil)
+		if err := result.Error(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -174,7 +220,9 @@ const (
 func NewComputeInterface(controlClient pb.ControllerClient, logger *slog.Logger) *ComputeInterface {
 	return &ComputeInterface{
 		ControlClient: controlClient,
-		connMap:       make(map[string]computeSession),
+		connMap:       common.NewDualMap[string, uint64, computeSession](),
+		taskCancel:    make(map[uint64]*common.TaskCanceler),
+		taskStatus:    make(map[uint64]common.TaskStatus),
 		reporter:      failsafe.NewExecutor[any](retrypolicy.Builder[any]().WithMaxRetries(3).Build()),
 		Glog:          logger,
 	}
@@ -185,15 +233,24 @@ func (c *ComputeInterface) AuthIntercept(ctx context.Context) (context.Context, 
 	if err != nil {
 		return nil, err
 	}
-	if _, ok := c.connMap[token]; !ok {
+
+	if val, ok := c.connMap.GetByKey1(token); !ok {
 		return nil, status.Errorf(codes.Unauthenticated, "Bad authorization token")
+	} else {
+		newCtx := context.WithValue(ctx, Session, *val)
+		return newCtx, nil
 	}
-	newCtx := context.WithValue(ctx, Session, c.connMap[token])
-	return newCtx, nil
 }
 
 func (c *ComputeInterface) TaskAssign(ctx context.Context, submission *pb.TaskAssignInfo) (*emptypb.Empty, error) {
 	fmt.Println("TaskAssign", submission)
+
+	c.taskStatus[submission.Id.Id] = common.Submitting
+	c.taskCancel[submission.Id.Id] = common.NewTaskCanceler(false)
+
+	canceler := c.taskCancel[submission.Id.Id]
+	_ = canceler.RoutineRegister(nil)
+	defer canceler.RoutineUnregister()
 
 	if submission.Interactive {
 		id, err := uuid.NewV7()
@@ -201,9 +258,10 @@ func (c *ComputeInterface) TaskAssign(ctx context.Context, submission *pb.TaskAs
 			return nil, err
 		}
 		token := id.String()
-		c.connMap[token] = computeSession{
+		c.connMap.Put(token, submission.Id.Id, computeSession{
 			assignInfo: submission,
-		}
+		})
+		c.taskStatus[submission.Id.Id] = common.Attaching
 		_, err = c.ControlClient.ReportTask(context.Background(), &pb.TaskReportInfo{
 			Id: submission.Id,
 			Event: &pb.TaskReportInfo_ReadyForAttach{
@@ -216,15 +274,45 @@ func (c *ComputeInterface) TaskAssign(ctx context.Context, submission *pb.TaskAs
 			return nil, err
 		}
 	} else {
+		c.taskStatus[submission.Id.Id] = common.Running
 		go func() {
+			cxt := canceler.RoutineRegister(nil)
+			defer canceler.RoutineUnregister()
+
 			cmd := exec.Command(submission.CommandLine.Program, submission.CommandLine.Args...)
 			cmd.Env = append(cmd.Env, submission.CommandLine.Env...)
-			output, err := cmd.CombinedOutput()
-			if err != nil {
-				fmt.Println("TaskAssign failed:", err)
+			var procErr error
+			var output []byte
+			procExited := make(chan struct{})
+			go func() {
+				output, procErr = cmd.CombinedOutput()
+				close(procExited)
+			}()
+			// wait until the command exits
+			alreadySentKilled := false
+		forloop:
+			for {
+				if !alreadySentKilled {
+					select {
+					case <-cxt.Done():
+						if err := cmd.Process.Kill(); err != nil {
+							c.Glog.Warn("Failed to kill the process", err)
+						}
+						alreadySentKilled = true
+					case _, _ = <-procExited:
+						break forloop
+					}
+				} else {
+					_, _ = <-procExited
+					break forloop
+				}
+			}
+			c.taskStatus[submission.Id.Id] = common.Exited
+			if procErr != nil {
+				fmt.Println("TaskAssign failed:", procErr)
 				return
 			}
-			_, err = c.ControlClient.ReportTask(context.Background(), &pb.TaskReportInfo{
+			_, err := c.ControlClient.ReportTask(context.Background(), &pb.TaskReportInfo{
 				Id: submission.Id,
 				Event: &pb.TaskReportInfo_Exited{
 					Exited: &pb.TaskReportInfo_TaskExited{
@@ -237,6 +325,42 @@ func (c *ComputeInterface) TaskAssign(ctx context.Context, submission *pb.TaskAs
 				panic(err)
 			}
 		}()
+
+	}
+
+	return &emptypb.Empty{}, nil
+}
+
+func (c *ComputeInterface) TaskCancel(ctx context.Context, id *pb.TaskId) (*emptypb.Empty, error) {
+	fmt.Println("TaskCancel", id)
+	canceler, ok := c.taskCancel[id.Id]
+	if !ok {
+		// fixme: canceling an old task?
+		return nil, errors.New("task not found")
+	}
+	if canceler.HasCanceled() {
+		return nil, context.Canceled
+	}
+	ok = canceler.CancelAndWaitAllRoutine()
+	if !ok {
+		return nil, context.Canceled
+	}
+
+	switch c.taskStatus[id.Id] {
+	case common.Pending:
+		panic("Pending tasks should never be sent to a compute node")
+	case common.Running:
+		panic("after cancelling, the task cannot be running")
+	case common.Attaching:
+		c.connMap.DeleteByKey2(id.Id)
+		fallthrough
+	case common.Submitting:
+		delete(c.taskStatus, id.Id)
+		delete(c.taskCancel, id.Id)
+		fallthrough
+	case common.Exited:
+	case common.Errored:
+	case common.Canceled:
 	}
 	return &emptypb.Empty{}, nil
 }
