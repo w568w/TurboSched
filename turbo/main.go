@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/creack/pty"
 	"github.com/dixonwille/wlog/v3"
 	"github.com/grpc-ecosystem/go-grpc-middleware/util/metautils"
 	tsize "github.com/kopoli/go-terminal-size"
@@ -195,14 +194,14 @@ func interactiveTaskMain(readyForAttach *pb.TaskEvent_ReadyForAttach) {
 
 	netConn, attrUpdateChan := common.NewGrpcConn(sshStream)
 	// send window size
-	r, c, _ := pty.Getsize(os.Stdin)
+	s, _ := tsize.GetSize()
 	err = sshStream.Send(&pb.SshBytes{
 		Data: &pb.SshBytes_AttributeUpdate{
 			AttributeUpdate: &pb.SshBytes_SshAttributeUpdate{
 				Update: &pb.SshBytes_SshAttributeUpdate_WindowSize_{
 					WindowSize: &pb.SshBytes_SshAttributeUpdate_WindowSize{
-						Rows:    uint32(r),
-						Columns: uint32(c),
+						Rows:    uint32(s.Height),
+						Columns: uint32(s.Width),
 					},
 				},
 			},
@@ -230,14 +229,14 @@ func interactiveTaskMain(readyForAttach *pb.TaskEvent_ReadyForAttach) {
 					return
 				}
 			case <-sizeChangeListener.Change:
-				r, c, _ := pty.Getsize(os.Stdin)
+				s, _ := tsize.GetSize()
 				err = sshStream.Send(&pb.SshBytes{
 					Data: &pb.SshBytes_AttributeUpdate{
 						AttributeUpdate: &pb.SshBytes_SshAttributeUpdate{
 							Update: &pb.SshBytes_SshAttributeUpdate_WindowSize_{
 								WindowSize: &pb.SshBytes_SshAttributeUpdate_WindowSize{
-									Rows:    uint32(r),
-									Columns: uint32(c),
+									Rows:    uint32(s.Height),
+									Columns: uint32(s.Width),
 								},
 							},
 						},
