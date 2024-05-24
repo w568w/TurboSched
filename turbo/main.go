@@ -7,6 +7,7 @@ import (
 	"github.com/creack/pty"
 	"github.com/dixonwille/wlog/v3"
 	"github.com/grpc-ecosystem/go-grpc-middleware/util/metautils"
+	tsize "github.com/kopoli/go-terminal-size"
 	"github.com/ross96D/cancelreader"
 	"github.com/spf13/viper"
 	"golang.org/x/sync/errgroup"
@@ -20,7 +21,6 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
-	"syscall"
 	"turbo_sched/common"
 	pb "turbo_sched/common/proto"
 )
@@ -216,8 +216,11 @@ func interactiveTaskMain(readyForAttach *pb.TaskEvent_ReadyForAttach) {
 	exitCodeChan := make(chan int32, 1)
 	pipingErrChan := make(chan error, 3)
 	// Handle pty size.
-	sizeChangedSig := make(chan os.Signal, 1)
-	signal.Notify(sizeChangedSig, syscall.SIGWINCH)
+	sizeChangeListener, err := tsize.NewSizeListener()
+	if err != nil {
+		Glog.Error("cannot create terminal size listener")
+		panic(err)
+	}
 	go func() {
 		for {
 			select {
@@ -226,7 +229,7 @@ func interactiveTaskMain(readyForAttach *pb.TaskEvent_ReadyForAttach) {
 					exitCodeChan <- exitStatus.ExitStatus
 					return
 				}
-			case <-sizeChangedSig:
+			case <-sizeChangeListener.Change:
 				r, c, _ := pty.Getsize(os.Stdin)
 				err = sshStream.Send(&pb.SshBytes{
 					Data: &pb.SshBytes_AttributeUpdate{
