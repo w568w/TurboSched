@@ -105,14 +105,17 @@ func NewControlInterface(db *gorm.DB, logger *slog.Logger) *ControlInterface {
 			// set pickDevice to busy and task to submitting
 			err := c.Database.Transaction(func(tx *gorm.DB) error {
 				for _, device := range pickDevice {
-					tx.Model(device).Select("Status").Updates(common.DeviceModel{
+					err := tx.Model(device).Select("Status").Updates(common.DeviceModel{
 						Status: int64(nextTask.ID),
-					})
+					}).Error
+					if err != nil {
+						return err
+					}
 				}
-				tx.Model(&nextTask).Select("Status").Updates(common.TaskModel{
+				err := tx.Model(&nextTask).Select("Status").Updates(common.TaskModel{
 					Status: common.Submitting,
-				})
-				return nil
+				}).Error
+				return err
 			})
 			if err != nil {
 				canceler.RoutineUnregister()
@@ -239,11 +242,17 @@ func (c *ControlInterface) CheckInNode(ctx context.Context, nodeInfo *pb.NodeInf
 	fmt.Println("CheckInNode", nodeInfo.HostName, nodeInfo.Port, nodeInfo.Devices)
 
 	err = c.Database.Transaction(func(tx *gorm.DB) error {
-		tx.Save(&node)
+		err := tx.Save(&node).Error
+		if err != nil {
+			return err
+		}
 		// remove old devices which Uuid is not in Devices
-		tx.Where("node_model_name = ? AND uuid NOT IN ?", nodeInfo.HostName, deviceUuids).Delete(&common.DeviceModel{})
-		tx.Save(&deviceModels)
-		return nil
+		err = tx.Where("node_model_name = ? AND uuid NOT IN ?", nodeInfo.HostName, deviceUuids).Delete(&common.DeviceModel{}).Error
+		if err != nil {
+			return err
+		}
+		err = tx.Save(&deviceModels).Error
+		return err
 	})
 	if err != nil {
 		return nil, err
@@ -319,7 +328,8 @@ func (c *ControlInterface) ReportTask(ctx context.Context, info *pb.TaskReportIn
 				},
 			},
 		})
-	} else if err := info.GetError(); err != nil {
+	} else if err != nil {
+		c.Glog.Error(fmt.Sprintf("Task %d errored: %s", info.Id.Id, err.Message))
 		task := common.TaskModel{
 			ID:           info.Id.Id,
 			Status:       common.Errored,
@@ -388,13 +398,15 @@ func (c *ControlInterface) SubmitNewTaskInteractive(taskInfo *pb.TaskSubmitInfo,
 						ReadyForAttach: attachment,
 					},
 				})
+				if err != nil {
+					// TODO maybe client has disconnected? handle this
+					panic(err)
+				}
 			}
 			// fixme: enumerate all possible status
 			if newStatus >= common.Attaching {
 				return nil
 			}
-		}
-	}
 		case <-cxt.Done():
 			return cxt.Err()
 		}

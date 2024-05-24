@@ -173,7 +173,7 @@ forloop:
 
 	if execErr != nil {
 		// is there something error, or just the command exited with non-zero code?
-		println(fmt.Sprintf("Command failed: %+v", execErr))
+		c.Glog.Warn("Command failed", execErr)
 		var exitError *exec.ExitError
 		if !errors.As(execErr, &exitError) {
 			c.reportErrorTaskAsync(s.assignInfo.Id, execErr)
