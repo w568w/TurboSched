@@ -54,15 +54,16 @@ func NewControlInterface(db *gorm.DB, logger *slog.Logger) *ControlInterface {
 		for {
 			schedCond.L.Lock()
 			schedCond.Wait()
-			fmt.Println("schedCond triggered")
+			c.Glog.Debug("schedCond triggered")
 			var nextTask common.TaskModel
 			result := c.Database.Where(&common.TaskModel{Status: common.Pending}, "Status").Take(&nextTask)
 			if result.Error != nil {
 				schedCond.L.Unlock()
 				if errors.Is(result.Error, gorm.ErrRecordNotFound) {
-					fmt.Println("No task to schedule")
+					c.Glog.Debug("No task to schedule")
 					continue
 				}
+				// panic if the database has something wrong
 				panic(result.Error)
 			}
 			canceler := c.taskCancel[nextTask.ID]
@@ -96,7 +97,7 @@ func NewControlInterface(db *gorm.DB, logger *slog.Logger) *ControlInterface {
 			}
 
 			if pickNode == nil {
-				fmt.Println("No enough devices for task", nextTask.ID)
+				c.Glog.Info("No enough devices for task", nextTask.ID)
 				canceler.RoutineUnregister()
 				schedCond.L.Unlock()
 				continue
@@ -167,8 +168,27 @@ func (c *ControlInterface) getComputeClient(cxt context.Context, node *common.No
 	return c.connections[node.Name], nil
 }
 
+func (c *ControlInterface) markNodeOffline(node *common.NodeModel, err error) {
+	c.Glog.Warn(fmt.Sprintf("Node %s is offline, err: %s", node.Name, err.Error()))
+	err = c.Database.Model(node).Select("Status").Updates(common.NodeModel{
+		Status: common.Offline,
+	}).Error
+	if err != nil {
+		panic(err)
+	}
+}
+
+//type NodeOfflineError struct {
+//	Err error
+//}
+//
+//func (e NodeOfflineError) Error() string {
+//	return fmt.Sprintf("node offline: %s", e.Err.Error())
+//}
+
 func (c *ControlInterface) executeTask(task *common.TaskModel, node *common.NodeModel, deviceModels []*common.DeviceModel) {
-	fmt.Println("executeTask", task.ID, node.Name, deviceModels)
+	c.Glog.Debug(fmt.Sprintf("Executing task %d on node %s with devices %v", task.ID, node.Name, deviceModels))
+
 	canceler := c.taskCancel[task.ID]
 	if canceler.HasCanceled() {
 		return
@@ -181,7 +201,9 @@ func (c *ControlInterface) executeTask(task *common.TaskModel, node *common.Node
 		if errors.Is(err, context.Canceled) {
 			return
 		}
-		panic(err)
+		c.markNodeOffline(node, err)
+		// TODO return the task to the pool
+		return
 	}
 
 	cmdLine := task.CommandLine.Data()
@@ -197,7 +219,9 @@ func (c *ControlInterface) executeTask(task *common.TaskModel, node *common.Node
 		if errors.Is(err, context.Canceled) {
 			return
 		}
-		panic(err)
+		c.markNodeOffline(node, err)
+		// TODO return the task to the pool
+		return
 	}
 
 	result := c.Database.Model(&task).Select("Status").Updates(common.TaskModel{
@@ -239,7 +263,7 @@ func (c *ControlInterface) CheckInNode(ctx context.Context, nodeInfo *pb.NodeInf
 		deviceUuids = append(deviceUuids, device.Uuid)
 	}
 
-	fmt.Println("CheckInNode", nodeInfo.HostName, nodeInfo.Port, nodeInfo.Devices)
+	c.Glog.Info(fmt.Sprintf("New node %s:%d with %d devices", nodeInfo.HostName, nodeInfo.Port, len(nodeInfo.Devices)))
 
 	err = c.Database.Transaction(func(tx *gorm.DB) error {
 		err := tx.Save(&node).Error
@@ -279,40 +303,47 @@ func (c *ControlInterface) ReportTask(ctx context.Context, info *pb.TaskReportIn
 			Status: common.Exited,
 		}
 		c.Glog.Info(fmt.Sprintf("Task %d exited with code %d:\n%s", info.Id.Id, exitedStatus.ExitCode, exitedStatus.Output))
-		// FIXME change state in a transaction
-		result := c.Database.Model(&task).Select("Status").Updates(task)
-		if result.Error != nil {
-			return nil, result.Error
-		}
-
-		// set device to idle
-		result = c.Database.Model(&common.DeviceModel{}).
-			Where(&common.DeviceModel{Status: int64(info.Id.Id)}, "Status").
-			Update("Status", common.Idle)
-		if result.Error != nil {
-			return nil, result.Error
+		err := c.Database.Transaction(func(tx *gorm.DB) error {
+			result := tx.Model(&task).Select("Status").Updates(task)
+			if result.Error != nil {
+				return result.Error
+			}
+			// set device to idle
+			result = tx.Model(&common.DeviceModel{}).
+				Where(&common.DeviceModel{Status: int64(info.Id.Id)}, "Status").
+				Update("Status", common.Idle)
+			return result.Error
+		})
+		if err != nil {
+			return nil, err
 		}
 	} else if readyForAttach := info.GetReadyForAttach(); readyForAttach != nil {
 		task := common.TaskModel{
 			ID:     info.Id.Id,
 			Status: common.Attaching,
 		}
-		result := c.Database.Model(&task).Select("Status").Updates(task)
-		if result.Error != nil {
-			return nil, result.Error
-		}
 
-		// get connection info
-		// TODO change for multi-node scheduling
-		var deviceModels []common.DeviceModel
-		result = c.Database.Where(&common.DeviceModel{Status: int64(info.Id.Id)}, "Status").Find(&deviceModels)
-		if result.Error != nil {
-			return nil, result.Error
-		}
-		node := common.NodeModel{Name: deviceModels[0].NodeModelName}
-		result = c.Database.First(&node)
-		if result.Error != nil {
-			return nil, result.Error
+		var node common.NodeModel
+		err := c.Database.Transaction(func(tx *gorm.DB) error {
+			result := tx.Model(&task).Select("Status").Updates(task)
+			if result.Error != nil {
+				return result.Error
+			}
+			// get all devices assigned to the task
+			var deviceModels []common.DeviceModel
+			result = tx.Where(&common.DeviceModel{Status: int64(info.Id.Id)}, "Status").Find(&deviceModels)
+			if result.Error != nil {
+				return result.Error
+			}
+
+			// get node with the devices
+			// TODO change for multi-node scheduling
+			node.Name = deviceModels[0].NodeModelName
+			result = tx.First(&node)
+			return result.Error
+		})
+		if err != nil {
+			return nil, err
 		}
 
 		c.taskSub.Publish(info.Id.Id, TaskEvent{
@@ -335,17 +366,20 @@ func (c *ControlInterface) ReportTask(ctx context.Context, info *pb.TaskReportIn
 			Status:       common.Errored,
 			ErrorMessage: err.Message,
 		}
-		result := c.Database.Model(&task).Select("Status", "ErrorMessage").Updates(task)
-		if result.Error != nil {
-			return nil, result.Error
-		}
+		err := c.Database.Transaction(func(tx *gorm.DB) error {
+			result := tx.Model(&task).Select("Status", "ErrorMessage").Updates(task)
+			if result.Error != nil {
+				return result.Error
+			}
 
-		// set device to idle
-		result = c.Database.Model(&common.DeviceModel{}).
-			Where(&common.DeviceModel{Status: int64(info.Id.Id)}, "Status").
-			Update("Status", common.Idle)
-		if result.Error != nil {
-			return nil, result.Error
+			// set device to idle
+			result = tx.Model(&common.DeviceModel{}).
+				Where(&common.DeviceModel{Status: int64(info.Id.Id)}, "Status").
+				Update("Status", common.Idle)
+			return result.Error
+		})
+		if err != nil {
+			return nil, err
 		}
 
 		c.taskSub.Publish(info.Id.Id, TaskEvent{
@@ -388,6 +422,7 @@ func (c *ControlInterface) SubmitNewTaskInteractive(taskInfo *pb.TaskSubmitInfo,
 		select {
 		case event, ok := <-notification:
 			if !ok {
+				// the task status channel is closed. Stop the stream
 				return nil
 			}
 			newStatus := event.(TaskEvent).NewStatus
@@ -399,8 +434,9 @@ func (c *ControlInterface) SubmitNewTaskInteractive(taskInfo *pb.TaskSubmitInfo,
 					},
 				})
 				if err != nil {
-					// TODO maybe client has disconnected? handle this
-					panic(err)
+					// maybe client has disconnected?
+					c.Glog.Error(fmt.Sprintf("Failed to send ready for attach event to user: %s", err.Error()))
+					return err
 				}
 			}
 			// fixme: enumerate all possible status
