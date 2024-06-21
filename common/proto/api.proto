@@ -45,9 +45,10 @@ message TaskSubmitInfo {
 
 // User listens to TaskEvent to get the task status change.
 message TaskEvent {
+  // Necessary information for the user to attach to the node.
   message ConnInfo {
     string host = 1;
-    uint32 port = 2;
+    uint32 port = 2; // in fact we want uint16 here, but protobuf does not support it.
     string token = 3;
   }
   message ReadyForAttach {

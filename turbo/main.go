@@ -16,6 +16,7 @@ import (
 	grpcMetadata "google.golang.org/grpc/metadata"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"strconv"
@@ -172,7 +173,7 @@ func interactiveTaskMain(readyForAttach *pb.TaskEvent_ReadyForAttach) {
 	opts := []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	}
-	conn, err := grpc.NewClient(fmt.Sprintf("%s:%d", readyForAttach.ConnInfos[0].Host, readyForAttach.ConnInfos[0].Port), opts...)
+	conn, err := grpc.NewClient(net.JoinHostPort(readyForAttach.ConnInfos[0].Host, fmt.Sprintf("%d", readyForAttach.ConnInfos[0].Port)), opts...)
 	defer func(conn *grpc.ClientConn) {
 		err := conn.Close()
 		if err != nil {
