@@ -214,7 +214,7 @@ forloop:
 	if cxt.Err() == nil {
 		result := c.reportExitedTaskAsync(s.assignInfo.Id, int32(cmd.ProcessState.ExitCode()), nil)
 		if err := result.Error(); err != nil {
-			// TODO check if the task is canceled
+			// TODO check if the task is canceled. If canceled, we may not need to report the exit status.
 			// fixme UCodeDialNode is not suitable here
 			return common.WrapError(common.UCodeDialNode, "Failed to report task exit status", err, false)
 		}
@@ -346,7 +346,7 @@ func (c *ComputeInterface) TaskCancel(ctx context.Context, id *pb.TaskId) (*empt
 	fmt.Println("TaskCancel", id)
 	canceler, ok := c.taskCancel[id.Id]
 	if !ok {
-		// fixme: canceling an old task?
+		// fixme: is the controller canceling an old task?
 		return nil, common.NewError(common.UCodeTaskNotFound, "the requested task is not found", false)
 	}
 	if canceler.HasCanceled() {

@@ -130,6 +130,8 @@ func NewControlInterface(db *gorm.DB, logger *slog.Logger) *ControlInterface {
 			c.taskSub.Publish(nextTask.ID, TaskEvent{
 				NewStatus: common.Submitting,
 			})
+
+			// TODO report executeTask's possible error to client
 			go c.executeTask(&nextTask, pickNode, pickDevice)
 		}
 	}()
