@@ -86,13 +86,13 @@ func (c *ComputeInterface) SshTunnel(server pb.Compute_SshTunnelServer) error {
 	windowEvent, err := server.Recv()
 	if err != nil {
 		c.reportErrorTaskAsync(s.assignInfo.Id, err)
-		return err
+		return common.WrapError(common.UCodeStreamError, "failed to receive window size from client", err, false)
 	}
 	window := windowEvent.GetAttributeUpdate().GetWindowSize()
 	if window == nil {
 		err = fmt.Errorf("first message should be about window size")
 		c.reportErrorTaskAsync(s.assignInfo.Id, err)
-		return err
+		return common.WrapError(common.UCodeMalformedVariant, "first message should be about window size", err, false)
 	}
 
 	// before we start the command, check cancellation again
@@ -108,7 +108,7 @@ func (c *ComputeInterface) SshTunnel(server pb.Compute_SshTunnelServer) error {
 	})
 	if err != nil {
 		c.reportErrorTaskAsync(s.assignInfo.Id, err)
-		return err
+		return common.WrapError(common.UCodeSystemInternal, "failed to start command with pty", err, false)
 	}
 	var eg errgroup.Group
 	eg.Go(func() error {
@@ -182,7 +182,7 @@ forloop:
 		var exitError *exec.ExitError
 		if !errors.As(execErr, &exitError) {
 			c.reportErrorTaskAsync(s.assignInfo.Id, execErr)
-			return execErr
+			return common.WrapError(common.UCodeSystemInternal, "command execution failed", execErr, false)
 		}
 	}
 	// tell the client we are done, so that it will close remote connection
@@ -214,7 +214,9 @@ forloop:
 	if cxt.Err() == nil {
 		result := c.reportExitedTaskAsync(s.assignInfo.Id, int32(cmd.ProcessState.ExitCode()), nil)
 		if err := result.Error(); err != nil {
-			return err
+			// TODO check if the task is canceled
+			// fixme UCodeDialNode is not suitable here
+			return common.WrapError(common.UCodeDialNode, "Failed to report task exit status", err, false)
 		}
 	}
 	return nil
@@ -262,7 +264,7 @@ func (c *ComputeInterface) TaskAssign(ctx context.Context, submission *pb.TaskAs
 	if submission.Interactive {
 		id, err := uuid.NewV7()
 		if err != nil {
-			return nil, err
+			return nil, common.WrapError(common.UCodeSystemInternal, "Failed to generate uuid", err, false)
 		}
 		token := id.String()
 		c.connMap.Put(token, submission.Id.Id, computeSession{
@@ -278,7 +280,9 @@ func (c *ComputeInterface) TaskAssign(ctx context.Context, submission *pb.TaskAs
 			},
 		})
 		if err != nil {
-			return nil, err
+			// TODO check if the task is canceled
+			// fixme UCodeDialNode is not suitable here
+			return nil, common.WrapError(common.UCodeDialNode, "Failed to report task ready for attach", err, false)
 		}
 	} else {
 		c.taskStatus[submission.Id.Id] = common.Running
@@ -343,7 +347,7 @@ func (c *ComputeInterface) TaskCancel(ctx context.Context, id *pb.TaskId) (*empt
 	canceler, ok := c.taskCancel[id.Id]
 	if !ok {
 		// fixme: canceling an old task?
-		return nil, errors.New("task not found")
+		return nil, common.NewError(common.UCodeTaskNotFound, "the requested task is not found", false)
 	}
 	if canceler.HasCanceled() {
 		return nil, context.Canceled
@@ -355,7 +359,7 @@ func (c *ComputeInterface) TaskCancel(ctx context.Context, id *pb.TaskId) (*empt
 
 	switch c.taskStatus[id.Id] {
 	case common.Pending:
-		panic("Pending tasks should never be sent to a compute node")
+		panic("pending tasks should never be sent to a compute node")
 	case common.Running:
 		panic("after cancelling, the task cannot be running")
 	case common.Attaching:

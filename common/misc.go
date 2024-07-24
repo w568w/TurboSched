@@ -2,8 +2,6 @@ package common
 
 import (
 	"context"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 // Some misc functions that are used in multiple places, but don't really belong
@@ -60,9 +58,4 @@ func WithBothCxt(ctx1, ctx2 context.Context) (mergedContext context.Context, mer
 		// In that case, cancelWrappedCtx1 in AfterFunc will not be called.
 		cancelWrappedCtx1(context.Canceled)
 	}
-}
-
-// IsGrpcCanceled returns true if the given error is about a canceled Grpc call.
-func IsGrpcCanceled(err error) bool {
-	return status.Code(err) == codes.Canceled
 }

@@ -1,6 +1,7 @@
 syntax = "proto3";
 
 import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
 
 option go_package = "./proto";
 
@@ -61,7 +62,7 @@ message TaskEvent {
   }
 }
 
-// A node reports TaskReportInfo to the server to report a task status change.
+// A compute node reports TaskReportInfo to the server to report a task status change.
 message TaskReportInfo {
   message TaskExited {
     bytes output = 1;
@@ -101,6 +102,13 @@ message SshBytes {
     bytes rawData = 1;
     SshAttributeUpdate attributeUpdate = 2;
   }
+}
+
+// UError's extended error field.
+message UErrorEx {
+  optional string originalError = 1;
+  google.protobuf.Timestamp occurredTime = 2;
+  uint32 code = 3;
 }
 
 service Controller {

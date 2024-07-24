@@ -146,7 +146,7 @@ func (c *ControlInterface) submitNewTask(taskInfo *pb.TaskSubmitInfo, interactiv
 	}
 	id, err := c.taskPool.Put(&task)
 	if err != nil {
-		return 0, err
+		return 0, common.WrapError(common.UCodeDatabase, "failed to put task into pool", err, false)
 	}
 	c.taskCancel[id] = common.NewTaskCanceler(false)
 
@@ -168,14 +168,11 @@ func (c *ControlInterface) getComputeClient(cxt context.Context, node *common.No
 	return c.connections[node.Name], nil
 }
 
-func (c *ControlInterface) markNodeOffline(node *common.NodeModel, err error) {
+func (c *ControlInterface) markNodeOffline(db *gorm.DB, node *common.NodeModel, err error) error {
 	c.Glog.Warn(fmt.Sprintf("Node %s is offline, err: %s", node.Name, err.Error()))
-	err = c.Database.Model(node).Select("Status").Updates(common.NodeModel{
+	return db.Model(node).Select("Status").Updates(common.NodeModel{
 		Status: common.Offline,
 	}).Error
-	if err != nil {
-		panic(err)
-	}
 }
 
 //type NodeOfflineError struct {
@@ -186,24 +183,20 @@ func (c *ControlInterface) markNodeOffline(node *common.NodeModel, err error) {
 //	return fmt.Sprintf("node offline: %s", e.Err.Error())
 //}
 
-func (c *ControlInterface) executeTask(task *common.TaskModel, node *common.NodeModel, deviceModels []*common.DeviceModel) {
+func (c *ControlInterface) executeTask(task *common.TaskModel, node *common.NodeModel, deviceModels []*common.DeviceModel) error {
 	c.Glog.Debug(fmt.Sprintf("Executing task %d on node %s with devices %v", task.ID, node.Name, deviceModels))
 
 	canceler := c.taskCancel[task.ID]
 	if canceler.HasCanceled() {
-		return
+		return context.Canceled
 	}
 	cxt := canceler.RoutineRegister(nil)
 	defer canceler.RoutineUnregister()
 
 	realClient, err := c.getComputeClient(cxt, node)
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			return
-		}
-		c.markNodeOffline(node, err)
-		// TODO return the task to the pool
-		return
+		// TODO when error happens, we should tell the client that we have some trouble
+		return common.WrapError(common.UCodeDialNode, "failed to dial compute client", err, false)
 	}
 
 	cmdLine := task.CommandLine.Data()
@@ -217,30 +210,54 @@ func (c *ControlInterface) executeTask(task *common.TaskModel, node *common.Node
 	})
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
-			return
+			return err
 		}
-		c.markNodeOffline(node, err)
-		// TODO return the task to the pool
-		return
+		dbErr := c.Database.Transaction(func(tx *gorm.DB) error {
+			err := c.markNodeOffline(tx, node, err)
+			if err != nil {
+				return err
+			}
+			// return the device to the pool
+			// set device to idle
+			err = tx.Model(&common.DeviceModel{}).
+				Where(&common.DeviceModel{Status: int64(task.ID)}, "Status").
+				Update("Status", common.Idle).Error
+			if err != nil {
+				return err
+			}
+			// return the task to the pool
+			err = c.taskPool.Action(func() (bool, error) {
+				return true, c.Database.Model(task).Select("Status").Updates(common.TaskModel{
+					Status: common.Pending,
+				}).Error
+			})
+			return err
+		})
+		if dbErr != nil {
+			return common.WrapError(common.UCodeDatabase, "failed to rollback task", dbErr, false)
+		}
+
+		return common.WrapError(common.UCodeAssignTask, "failed to assign task to node", err, false)
 	}
 
 	result := c.Database.Model(&task).Select("Status").Updates(common.TaskModel{
 		Status: common.Running,
 	})
 	if result.Error != nil {
-		panic(result.Error)
+		return common.WrapError(common.UCodeDatabase, "failed to update task status to running", result.Error, false)
 	}
+	return nil
 }
 
 func (c *ControlInterface) CheckInNode(ctx context.Context, nodeInfo *pb.NodeInfo) (*emptypb.Empty, error) {
 	p, ok := peer.FromContext(ctx)
 	if !ok {
-		return nil, errors.New("failed to get peer")
+		return nil, common.NewError(common.UCodeInvalidPeerInfo, "no peer info in context", false)
 	}
 	// prepare node info
 	tcpAddr, err := net.ResolveTCPAddr(p.Addr.Network(), p.Addr.String())
 	if err != nil {
-		panic(err)
+		return nil, common.WrapError(common.UCodeInvalidPeerInfo, "failed to resolve peer TCP address", err, false)
 	}
 	node := common.NodeModel{
 		Name:   nodeInfo.HostName,
@@ -279,7 +296,7 @@ func (c *ControlInterface) CheckInNode(ctx context.Context, nodeInfo *pb.NodeInf
 		return err
 	})
 	if err != nil {
-		return nil, err
+		return nil, common.WrapError(common.UCodeDatabase, "failed to save node and devices", err, false)
 	}
 	return &emptypb.Empty{}, nil
 }
@@ -287,7 +304,7 @@ func (c *ControlInterface) CheckInNode(ctx context.Context, nodeInfo *pb.NodeInf
 func (c *ControlInterface) ReportTask(ctx context.Context, info *pb.TaskReportInfo) (*emptypb.Empty, error) {
 	canceler, ok := c.taskCancel[info.Id.Id]
 	if !ok {
-		return nil, errors.New("task not found")
+		return nil, common.NewError(common.UCodeTaskNotFound, "task not found", false)
 	}
 	exitedStatus := info.GetExited()
 	err := info.GetError()
@@ -315,7 +332,7 @@ func (c *ControlInterface) ReportTask(ctx context.Context, info *pb.TaskReportIn
 			return result.Error
 		})
 		if err != nil {
-			return nil, err
+			return nil, common.WrapError(common.UCodeDatabase, "failed to update task status to exited", err, false)
 		}
 	} else if readyForAttach := info.GetReadyForAttach(); readyForAttach != nil {
 		task := common.TaskModel{
@@ -343,7 +360,7 @@ func (c *ControlInterface) ReportTask(ctx context.Context, info *pb.TaskReportIn
 			return result.Error
 		})
 		if err != nil {
-			return nil, err
+			return nil, common.WrapError(common.UCodeDatabase, "failed to update task status to attaching", err, false)
 		}
 
 		c.taskSub.Publish(info.Id.Id, TaskEvent{
@@ -379,7 +396,7 @@ func (c *ControlInterface) ReportTask(ctx context.Context, info *pb.TaskReportIn
 			return result.Error
 		})
 		if err != nil {
-			return nil, err
+			return nil, common.WrapError(common.UCodeDatabase, "failed to update task status to errored", err, false)
 		}
 
 		c.taskSub.Publish(info.Id.Id, TaskEvent{
@@ -387,28 +404,29 @@ func (c *ControlInterface) ReportTask(ctx context.Context, info *pb.TaskReportIn
 			ExtraData: err,
 		})
 	} else {
-		return nil, errors.New("unknown report type")
+		return nil, common.NewError(common.UCodeMalformedVariant, "unrecognized variant in task report", false)
 	}
 	return &emptypb.Empty{}, nil
 }
 
 func (c *ControlInterface) SubmitNewTask(ctx context.Context, taskInfo *pb.TaskSubmitInfo) (*pb.TaskId, error) {
-	id, err := c.submitNewTask(taskInfo, false)
-	if err != nil {
-		return nil, err
+	id, wrappedErr := c.submitNewTask(taskInfo, false)
+	if wrappedErr != nil {
+		return nil, wrappedErr
 	}
 	return &pb.TaskId{Id: id}, nil
 }
 
 func (c *ControlInterface) SubmitNewTaskInteractive(taskInfo *pb.TaskSubmitInfo, stream pb.Controller_SubmitNewTaskInteractiveServer) error {
-	id, err := c.submitNewTask(taskInfo, true)
-	if err != nil {
-		return err
+	id, wrappedErr := c.submitNewTask(taskInfo, true)
+	if wrappedErr != nil {
+		return wrappedErr
 	}
 
-	err = stream.Send(&pb.TaskEvent{Event: &pb.TaskEvent_ObtainedId{ObtainedId: &pb.TaskId{Id: id}}})
+	err := stream.Send(&pb.TaskEvent{Event: &pb.TaskEvent_ObtainedId{ObtainedId: &pb.TaskId{Id: id}}})
 	if err != nil {
-		return err
+		// TODO when unable to contact with client, we should cancel the task
+		return common.WrapError(common.UCodeStreamError, "failed to send task id to client", err, false)
 	}
 	notification := c.taskSub.Subscribe(id, 0)
 	defer c.taskSub.Unsubscribe(id, notification)
@@ -435,8 +453,8 @@ func (c *ControlInterface) SubmitNewTaskInteractive(taskInfo *pb.TaskSubmitInfo,
 				})
 				if err != nil {
 					// maybe client has disconnected?
-					c.Glog.Error(fmt.Sprintf("Failed to send ready for attach event to user: %s", err.Error()))
-					return err
+					c.Glog.Error(fmt.Sprintf("Failed to send ready for attach event to client: %s", err.Error()))
+					return common.WrapError(common.UCodeStreamError, "failed to send ready for attach event to client", err, false)
 				}
 			}
 			// fixme: enumerate all possible status
@@ -444,7 +462,7 @@ func (c *ControlInterface) SubmitNewTaskInteractive(taskInfo *pb.TaskSubmitInfo,
 				return nil
 			}
 		case <-cxt.Done():
-			return cxt.Err()
+			return cxt.Err() // usually context.Canceled
 		}
 	}
 }
@@ -453,21 +471,21 @@ func (c *ControlInterface) CancelTask(ctx context.Context, id *pb.TaskId) (*empt
 	canceler, ok := c.taskCancel[id.Id]
 	if !ok {
 		// fixme: canceling an old task?
-		return nil, errors.New("task not found")
+		return nil, common.NewError(common.UCodeTaskNotFound, "task not found", false)
 	}
 	if canceler.HasCanceled() {
-		return nil, errors.New("task already canceled")
+		return nil, common.NewError(common.UCodeWrongTaskState, "task already canceled", false)
 	}
 	ok = canceler.CancelAndWaitAllRoutine()
 	if !ok {
-		return nil, errors.New("task already canceled")
+		return nil, common.NewError(common.UCodeWrongTaskState, "task already canceled", false)
 	}
 
 	// clean up resources according to the task status
 	var task = common.TaskModel{ID: id.Id}
 	err := c.Database.First(&task).Error
 	if err != nil {
-		panic(err)
+		return nil, common.WrapError(common.UCodeDatabase, "task is in taskCancel list but not found in database. This is a bug: does anyone modify the database directly?", err, false)
 	}
 
 	removeAndFreeDevice := func() error {
@@ -496,11 +514,11 @@ func (c *ControlInterface) CancelTask(ctx context.Context, id *pb.TaskId) (*empt
 	switch task.Status {
 	case common.Pending:
 		if err = removeAndFreeDevice(); err != nil {
-			panic(err)
+			return nil, common.WrapError(common.UCodeDatabase, "failed to cancel the pending task", err, false)
 		}
 	case common.Submitting:
 		if err = removeAndFreeDevice(); err != nil {
-			panic(err)
+			return nil, common.WrapError(common.UCodeDatabase, "failed to cancel the submitting task", err, false)
 		}
 	case common.Attaching:
 		fallthrough
@@ -509,31 +527,32 @@ func (c *ControlInterface) CancelTask(ctx context.Context, id *pb.TaskId) (*empt
 		var deviceModels []common.DeviceModel
 		result := c.Database.Where(&common.DeviceModel{Status: int64(id.Id)}, "Status").Find(&deviceModels)
 		if result.Error != nil {
-			return nil, result.Error
+			return nil, common.WrapError(common.UCodeDatabase, "failed to get devices for task", result.Error, false)
 		}
 		node := common.NodeModel{Name: deviceModels[0].NodeModelName}
 		result = c.Database.First(&node)
 		realClient, err := c.getComputeClient(ctx, &node)
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {
-				panic(err)
+				return nil, common.WrapError(common.UCodeDialNode, "failed to dial compute client to cancel task", err, false)
 			}
 		}
 		// tell the node to terminate the task
 		if _, err = realClient.TaskCancel(ctx, id); err != nil {
 			if !errors.Is(err, context.Canceled) {
-				panic(err)
+				// fixme UCodeAssignTask is not suitable here
+				return nil, common.WrapError(common.UCodeAssignTask, "failed to cancel task running on node", err, false)
 			}
 		}
 		if err = removeAndFreeDevice(); err != nil {
 			panic(err)
 		}
 	case common.Exited:
-		return nil, errors.New("task already exited")
+		return nil, common.NewError(common.UCodeWrongTaskState, "task already exited", false)
 	case common.Errored:
-		return nil, errors.New("task already errored")
+		return nil, common.NewError(common.UCodeWrongTaskState, "task already errored", false)
 	case common.Canceled:
-		return nil, errors.New("task already canceled")
+		return nil, common.NewError(common.UCodeWrongTaskState, "task already canceled", false)
 	}
 	return &emptypb.Empty{}, nil
 }
