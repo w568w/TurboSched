@@ -6,15 +6,35 @@ import (
 	"gorm.io/gorm"
 )
 
-// The generic interface for a pool item.
+// PoolItem is the generic interface for a pool item.
 type PoolItem[IdType any] interface {
-	// Get the item id.
+	// GetId returns the item id.
 	GetId() IdType
-	// Get the database pointer object (i.e. we can call db.Create(item.getDBObj()) to save it to database)
+	// AsDBPtr returns the database pointer object (i.e. we can call db.Create(item.getDBObj()) to save it to database)
 	AsDBPtr() any
 }
 
-// A task pool backed by a database.
+// WithCondition is an interface for a pool that has a condition variable.
+type WithCondition interface {
+	// GetConditionVar returns the condition variable of the pool.
+	GetConditionVar() *sync.Cond
+}
+
+// scopedAction does some custom action with a condition variable locked.
+func scopedAction(action func() (needNotify bool, err error), withCond WithCondition) error {
+	withCond.GetConditionVar().L.Lock()
+	defer withCond.GetConditionVar().L.Unlock()
+	needNotify, err := action()
+	if err != nil {
+		return err
+	}
+	if needNotify {
+		withCond.GetConditionVar().Signal()
+	}
+	return nil
+}
+
+// TaskPool is a task pool backed by a database.
 type TaskPool struct {
 	database  *gorm.DB
 	schedCond *sync.Cond
@@ -31,17 +51,24 @@ func NewTaskPool(db *gorm.DB, schedCond *sync.Cond) *TaskPool {
 
 // Put a task to the pool.
 func (q *TaskPool) Put(task Task) (uint64, error) {
-	q.schedCond.L.Lock()
-	defer q.schedCond.L.Unlock()
-	result := q.database.Create(task.AsDBPtr())
-	if result.Error != nil {
-		return 0, result.Error
-	}
-	q.schedCond.Signal()
-	return task.GetId(), nil
+	err := q.Action(func() (bool, error) {
+		result := q.database.Save(task.AsDBPtr())
+		return true, result.Error
+	})
+	return task.GetId(), err
 }
 
-// A device pool backed by a database.
+// implement the WithCondition interface
+func (q *TaskPool) GetConditionVar() *sync.Cond {
+	return q.schedCond
+}
+
+// Action does some custom action with pool locked.
+func (q *TaskPool) Action(action func() (bool, error)) error {
+	return scopedAction(action, q)
+}
+
+// DevicePool is a device pool backed by a database.
 type DevicePool struct {
 	database  *gorm.DB
 	schedCond *sync.Cond
@@ -58,11 +85,18 @@ func NewDevicePool(db *gorm.DB, schedCond *sync.Cond) *DevicePool {
 
 // Put a device to the pool.
 func (q *DevicePool) Put(device Device) error {
-	q.schedCond.L.Lock()
-	defer q.schedCond.L.Unlock()
-	result := q.database.Save(device.AsDBPtr())
-	if result.Error != nil {
-		q.schedCond.Signal()
-	}
-	return result.Error
+	return q.Action(func() (bool, error) {
+		result := q.database.Save(device.AsDBPtr())
+		return true, result.Error
+	})
+}
+
+// Action does some custom action. See TaskPool.Action for more details.
+func (q *DevicePool) Action(action func() (bool, error)) error {
+	return scopedAction(action, q)
+}
+
+// implement the WithCondition interface
+func (q *DevicePool) GetConditionVar() *sync.Cond {
+	return q.schedCond
 }
