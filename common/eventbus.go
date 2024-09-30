@@ -7,6 +7,7 @@ import (
 	"sync"
 )
 
+// EventBus is a sticky broadcast system.
 type EventBus[KeyType comparable] struct {
 	subscribers   map[KeyType][]chan any
 	messages      map[KeyType][]any

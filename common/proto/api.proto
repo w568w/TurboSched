@@ -5,7 +5,24 @@ import "google/protobuf/timestamp.proto";
 
 option go_package = "./proto";
 
-// A new node should report NodeInfo to the server.
+// The controller returns NodeSummaries to the user query.
+message NodeSummary {
+  message DeviceSummary {
+    uint32 localId = 1;
+    string uuid = 2;
+    int64 status = 3; // should be DeviceStatus.
+  }
+  string hostName = 1;
+  string address = 2;
+  uint32 port = 3;
+  uint32 status = 4; // should be NodeStatus.
+  repeated DeviceSummary devices = 5;
+}
+message NodeSummaries {
+  repeated NodeSummary nodes = 1;
+}
+
+// A new node should report NodeInfo to the controller.
 message NodeInfo {
   message DeviceInfo {
     uint32 localId = 1;

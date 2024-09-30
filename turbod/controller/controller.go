@@ -131,8 +131,13 @@ func NewControlInterface(db *gorm.DB, logger *slog.Logger) *ControlInterface {
 				NewStatus: common.Submitting,
 			})
 
-			// TODO report executeTask's possible error to client
-			go c.executeTask(&nextTask, pickNode, pickDevice)
+			// new goroutine to execute the task and report errors to the client if any
+			go func() {
+				err := c.executeTask(&nextTask, pickNode, pickDevice)
+				if err != nil {
+
+				}
+			}()
 		}
 	}()
 
@@ -176,14 +181,6 @@ func (c *ControlInterface) markNodeOffline(db *gorm.DB, node *common.NodeModel, 
 		Status: common.Offline,
 	}).Error
 }
-
-//type NodeOfflineError struct {
-//	Err error
-//}
-//
-//func (e NodeOfflineError) Error() string {
-//	return fmt.Sprintf("node offline: %s", e.Err.Error())
-//}
 
 func (c *ControlInterface) executeTask(task *common.TaskModel, node *common.NodeModel, deviceModels []*common.DeviceModel) error {
 	c.Glog.Debug(fmt.Sprintf("Executing task %d on node %s with devices %v", task.ID, node.Name, deviceModels))
@@ -458,6 +455,9 @@ func (c *ControlInterface) SubmitNewTaskInteractive(taskInfo *pb.TaskSubmitInfo,
 					c.Glog.Error(fmt.Sprintf("Failed to send ready for attach event to client: %s", err.Error()))
 					return common.WrapError(common.UCodeStreamError, "failed to send ready for attach event to client", err, false)
 				}
+			} else if newStatus == common.Errored {
+				taskErr := event.(TaskEvent).ExtraData.(error)
+				// TODO when error happens, we should tell the client that we have some trouble
 			}
 			// fixme: enumerate all possible status
 			if newStatus >= common.Attaching {
@@ -469,92 +469,126 @@ func (c *ControlInterface) SubmitNewTaskInteractive(taskInfo *pb.TaskSubmitInfo,
 	}
 }
 
-func (c *ControlInterface) CancelTask(ctx context.Context, id *pb.TaskId) (*emptypb.Empty, error) {
-	canceler, ok := c.taskCancel[id.Id]
+// cancelTask cancels a task with the given id immediately, and set the task status to cancelStatus.
+// Note that "cancel" here is not equivalent to "common.Canceled" task status. For example, when error occurs during task execution,
+// we also call this function to cancel the task.
+// For cancelStatus, it should be common.Canceled or common.Errored.
+// extraBroadcastData is the extra data to be sent to status subscribers.
+func (c *ControlInterface) cancelTask(ctx context.Context, id uint64, cancelStatus common.TaskStatus, extraBroadcastData any) error {
+	canceler, ok := c.taskCancel[id]
 	if !ok {
-		// fixme: canceling an old task?
-		return nil, common.NewError(common.UCodeTaskNotFound, "task not found", false)
+		// fixme: are we canceling an old task?
+		return common.NewError(common.UCodeTaskNotFound, "task not found", false)
 	}
 	if canceler.HasCanceled() {
-		return nil, common.NewError(common.UCodeWrongTaskState, "task already canceled", false)
+		return common.NewError(common.UCodeWrongTaskState, "task already canceled", false)
 	}
+
+	// send error broadcast early. Once a task ends with error, there is no way back.
+	// Also, we DO want to send the error message to the client (see SubmitNewTaskInteractive) before we cancel everything,
+	// including the communication channel with client.
+	if cancelStatus == common.Errored {
+		c.taskSub.Publish(id, TaskEvent{
+			NewStatus: cancelStatus,
+			ExtraData: extraBroadcastData,
+		})
+	}
+
 	ok = canceler.CancelAndWaitAllRoutine()
 	if !ok {
-		return nil, common.NewError(common.UCodeWrongTaskState, "task already canceled", false)
+		return common.NewError(common.UCodeWrongTaskState, "task already canceled", false)
 	}
 
 	// clean up resources according to the task status
-	var task = common.TaskModel{ID: id.Id}
+	var task = common.TaskModel{ID: id}
 	err := c.Database.First(&task).Error
 	if err != nil {
-		return nil, common.WrapError(common.UCodeDatabase, "task is in taskCancel list but not found in database. This is a bug: does anyone modify the database directly?", err, false)
+		return common.WrapError(common.UCodeDatabase, "task is in taskCancel list but error occurred when trying to look up it in database. This might be a bug: does someone modify the database directly?", err, false)
 	}
 
 	removeAndFreeDevice := func() error {
 		return c.Database.Transaction(func(tx *gorm.DB) error {
 			// set device to idle
+			// TODO what if the device should be set to errored?
 			err := tx.Model(&common.DeviceModel{}).
-				Where(&common.DeviceModel{Status: int64(id.Id)}, "Status").
+				Where(&common.DeviceModel{Status: int64(id)}, "Status").
 				Update("Status", common.Idle).Error
 			if err != nil {
 				return err
 			}
-			// set task to canceled
-			task.Status = common.Canceled
+			// set task to given status
+			task.Status = cancelStatus
 			err = tx.Model(&task).Select("Status").Updates(task).Error
 			if err != nil {
 				return err
 			}
 
-			c.taskSub.Publish(task.ID, TaskEvent{
-				NewStatus: common.Canceled,
-				ExtraData: nil,
-			})
+			// broadcast the task status after everything is done. Different from the early error broadcast above,
+			// we don't want to surprise the client about cancellation before we clean up everything.
+			if cancelStatus != common.Errored {
+				c.taskSub.Publish(task.ID, TaskEvent{
+					NewStatus: cancelStatus,
+					ExtraData: extraBroadcastData,
+				})
+			}
 			return nil
 		})
 	}
 	switch task.Status {
 	case common.Pending:
 		if err = removeAndFreeDevice(); err != nil {
-			return nil, common.WrapError(common.UCodeDatabase, "failed to cancel the pending task", err, false)
+			return common.WrapError(common.UCodeDatabase, "failed to cancel the pending task", err, false)
 		}
 	case common.Submitting:
 		if err = removeAndFreeDevice(); err != nil {
-			return nil, common.WrapError(common.UCodeDatabase, "failed to cancel the submitting task", err, false)
+			return common.WrapError(common.UCodeDatabase, "failed to cancel the submitting task", err, false)
 		}
 	case common.Attaching:
 		fallthrough
 	case common.Running:
 		// TODO change for multi-node scheduling
 		var deviceModels []common.DeviceModel
-		result := c.Database.Where(&common.DeviceModel{Status: int64(id.Id)}, "Status").Find(&deviceModels)
+		result := c.Database.Where(&common.DeviceModel{Status: int64(id)}, "Status").Find(&deviceModels)
 		if result.Error != nil {
-			return nil, common.WrapError(common.UCodeDatabase, "failed to get devices for task", result.Error, false)
+			return common.WrapError(common.UCodeDatabase, "failed to get devices for task", result.Error, false)
 		}
 		node := common.NodeModel{Name: deviceModels[0].NodeModelName}
 		result = c.Database.First(&node)
 		realClient, err := c.getComputeClient(ctx, &node)
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {
-				return nil, common.WrapError(common.UCodeDialNode, "failed to dial compute client to cancel task", err, false)
+				// fixme don't give up here, try to clean up our local states even if we can't contact the node
+				return common.WrapError(common.UCodeDialNode, "failed to dial compute client to cancel task", err, false)
 			}
 		}
 		// tell the node to terminate the task
-		if _, err = realClient.TaskCancel(ctx, id); err != nil {
+		if _, err = realClient.TaskCancel(ctx, &pb.TaskId{Id: id}); err != nil {
 			if !errors.Is(err, context.Canceled) {
 				// fixme UCodeAssignTask is not suitable here
-				return nil, common.WrapError(common.UCodeAssignTask, "failed to cancel task running on node", err, false)
+				// fixme we should try to clean up our local states even if we can't contact the node
+				return common.WrapError(common.UCodeAssignTask, "failed to cancel task running on node", err, false)
 			}
 		}
 		if err = removeAndFreeDevice(); err != nil {
 			panic(err)
 		}
 	case common.Exited:
-		return nil, common.NewError(common.UCodeWrongTaskState, "task already exited", false)
+		return common.NewError(common.UCodeWrongTaskState, "task already exited", false)
 	case common.Errored:
-		return nil, common.NewError(common.UCodeWrongTaskState, "task already errored", false)
+		return common.NewError(common.UCodeWrongTaskState, "task already errored", false)
 	case common.Canceled:
-		return nil, common.NewError(common.UCodeWrongTaskState, "task already canceled", false)
+		return common.NewError(common.UCodeWrongTaskState, "task already canceled", false)
+	}
+	return nil
+}
+
+func (c *ControlInterface) onTaskErrored(ctx context.Context, id uint64, err error) {
+	err := c.cancelTask(ctx, id, common.Errored, err)
+
+}
+func (c *ControlInterface) CancelTask(ctx context.Context, id *pb.TaskId) (*emptypb.Empty, error) {
+	if err := c.cancelTask(ctx, id.Id, common.Canceled, nil); err != nil {
+		return nil, err
 	}
 	return &emptypb.Empty{}, nil
 }
