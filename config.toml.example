@@ -1,4 +1,4 @@
 [controller]
-host_name = "myhost"
+host_name = "myhost" # Hostname of the controller. Used to automatically determine "am I the controller or compute node?" when turbod is started.
 addr = "127.0.0.1"
 port = 1234
